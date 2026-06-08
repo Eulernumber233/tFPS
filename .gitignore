@@ -1,0 +1,32 @@
+# Visual Studio
+.vs/
+*.sln.DotSettings.user
+bin/
+obj/
+
+# UE5 Build Artifacts
+Binaries/
+Intermediate/
+DerivedDataCache/
+
+# UE5 Saved (logs, config overrides, screenshots)
+Saved/
+
+# Content - Unreal Source Control ignore file (optional, if using UE's internal source control)
+Content/**/*_BuiltData.uasset
+
+# macOS
+.DS_Store
+*.dSYM
+
+# Rider / JetBrains
+.idea/
+
+# CLion
+cmake-build-*/
+
+# VS Code
+.vscode/
+
+# Custom
+.claude/plan/

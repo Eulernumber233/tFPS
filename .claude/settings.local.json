@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Depth 1 -Directory)",
+      "Bash(Select-Object Name)",
+      "PowerShell(\\(Get-ChildItem -Recurse -File | Measure-Object -Property Length -Sum\\).Sum / 1MB)",
+      "Bash(git lfs *)",
+      "Bash(git init *)",
+      "Bash(git add *)"
+    ]
+  }
+}
