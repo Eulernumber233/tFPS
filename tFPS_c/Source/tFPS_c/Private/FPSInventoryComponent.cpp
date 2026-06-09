@@ -1,6 +1,7 @@
 #include "FPSInventoryComponent.h"
 #include "FPSCharacter.h"
 #include "FPSPickup.h"
+#include "FPSItemDef.h"
 #include "Net/UnrealNetwork.h"
 
 UFPSInventoryComponent::UFPSInventoryComponent()
@@ -94,30 +95,59 @@ bool UFPSInventoryComponent::FindSlotFor(const UFPSItemDef* Def, int32& OutX, in
 	// 其余 ServerAddItem / 复制 / UI 数据流都不用改。
 }
 
-void UFPSInventoryComponent::ServerUseItem(int32 Index)
+FItemUseResult UFPSInventoryComponent::BeginItemUse(int32 Index)
 {
+	FItemUseResult Result;
+
 	if (!GetOwner() || !GetOwner()->HasAuthority())
-		return;
+		return Result;
 	if (!Items.IsValidIndex(Index))
-		return;
+		return Result;
 
 	AFPSCharacter* Character = GetOwnerCharacter();
 	if (!Character || Character->IsDead())
-		return;
+		return Result;
 
 	FInventoryEntry& Entry = Items[Index];
 	UFPSItemDef* Def = Entry.ItemDef;
 	if (!Def || !Def->ServerCanUse(Character, Entry))
-		return;
+		return Result;
 
-	// 道具自己改 Entry（扣耐久 / 扣数量），组件据结果决定删不删格。
-	Def->ServerUseItem(Character, Entry);
+	// 道具自己改 Entry（扣耐久 / 扣数量）。返回消耗量。
+	const int32 Consumed = Def->ServerUseItem(Character, Entry);
+	if (Consumed <= 0 && Def->GetItemUseType() != EFPSItemUseType::Instant)
+		return Result;   // 异步类道具没消耗任何东西 → 使用失败
 
+	// 组装返回信息
+	Result.UseType = Def->GetItemUseType();
+	Result.ConsumedAmount = Consumed;
+	Result.UseTime = Def->UseTime;
+
+	// 按子类提取专用配置（Cast 失败则留默认值 0，无影响）
+	if (const UFPSChanneledHealItemDef* CHDef = Cast<UFPSChanneledHealItemDef>(Def))
+	{
+		Result.HealPerTick = CHDef->HealPerTick;
+		Result.HealInterval = CHDef->HealInterval;
+	}
+	else if (const UFPSHoTItemDef* HoTDef = Cast<UFPSHoTItemDef>(Def))
+	{
+		Result.HoTBaseDuration = HoTDef->HoTBaseDuration;
+	}
+
+	// 检查是否耗尽 → 删格
 	const bool bExhausted = Def->bUsesDurability ? (Entry.Durability <= 0) : (Entry.Count <= 0);
 	if (bExhausted)
 		Items.RemoveAt(Index);
 
 	OnRep_Items();   // 服务端本机手动刷
+	return Result;
+}
+
+void UFPSInventoryComponent::ServerUseItem(int32 Index)
+{
+	// 即时类道具：BeginItemUse 同步完成全部效果，忽略返回值即可。
+	// 异步类道具的调用方应改用 BeginItemUse 拿 FItemUseResult。
+	BeginItemUse(Index);
 }
 
 void UFPSInventoryComponent::ServerDropItem(int32 Index)
@@ -163,6 +193,53 @@ void UFPSInventoryComponent::ServerClear()
 		return;
 
 	Items.Empty();
+	OnRep_Items();
+}
+
+int32 UFPSInventoryComponent::ConsumeAmmo(FName Caliber, int32 Amount, UFPSAmmoItemDef*& OutLastDef,
+	TArray<FWeaponAmmoEntry>* OutBreakdown)
+{
+	OutLastDef = nullptr;
+	if (OutBreakdown)
+		OutBreakdown->Reset();
+
+	if (!GetOwner() || !GetOwner()->HasAuthority() || Caliber.IsNone() || Amount <= 0)
+		return 0;
+
+	int32 Consumed = 0;
+
+	// 从数组末尾向前遍历（删格时不影响前面索引）
+	for (int32 i = Items.Num() - 1; i >= 0; --i)
+	{
+		if (Consumed >= Amount)
+			break;
+
+		FInventoryEntry& Entry = Items[i];
+		UFPSAmmoItemDef* AmmoDef = Cast<UFPSAmmoItemDef>(Entry.ItemDef);
+		if (!AmmoDef || AmmoDef->Caliber != Caliber)
+			continue;
+
+		const int32 Take = FMath::Min(Amount - Consumed, Entry.Count);
+		if (Take <= 0)
+			continue;
+
+		Entry.Count -= Take;
+		Consumed += Take;
+		OutLastDef = AmmoDef;
+
+		// 记录每次取弹明细（调用方用此构建弹药链）
+		if (OutBreakdown)
+			OutBreakdown->Add({AmmoDef, Take});
+
+		if (Entry.Count <= 0)
+			Items.RemoveAt(i);
+	}
+
+	return Consumed;
+}
+
+void UFPSInventoryComponent::MarkItemsDirty()
+{
 	OnRep_Items();
 }
 

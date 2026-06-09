@@ -1,8 +1,9 @@
-﻿#include "FPSCharacter.h"
+#include "FPSCharacter.h"
 #include "FPSWeapon.h"
 #include "FPSGameMode.h"
 #include "FPSPlayerState.h"
 #include "FPSInventoryComponent.h"
+#include "FPSItemDef.h"
 #include "FPSPickup.h"
 #include "FPSPlayerController.h"
 #include "Net/UnrealNetwork.h"
@@ -16,7 +17,6 @@
 #include "Engine/OverlapResult.h"
 #include "CollisionQueryParams.h"
 
-// 子弹/射击专用 Trace 通道，与 FPSWeapon.cpp 的 COLLISION_WEAPON 一致（DefaultEngine.ini Name="Weapon"）。
 #define COLLISION_WEAPON ECC_GameTraceChannel1
 
 AFPSCharacter::AFPSCharacter()
@@ -31,37 +31,38 @@ AFPSCharacter::AFPSCharacter()
 	bWantsToAim = false;
 	bWeaponEquipped = false;
 
-	// ---- 射击命中体设置 ----
-	// 子弹打骨骼网格体（贴合真实身体，可做部位判定），不打胶囊体（圆柱判定粗糙）。
-	// 胶囊体继续负责移动/落地碰撞；网格体只参与 query（射线），不参与物理。
 	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
 	{
-		// 胶囊体忽略子弹通道 —— 否则圆柱和网格双重命中，且命中点落在圆柱表面不贴模型。
 		Capsule->SetCollisionResponseToChannel(COLLISION_WEAPON, ECR_Ignore);
 	}
 
 	if (USkeletalMeshComponent* MeshComp = GetMesh())
 	{
-		// 仅 query：射线能命中，但不产生物理碰撞（移动仍靠胶囊）。
 		MeshComp->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 		MeshComp->SetCollisionObjectType(ECC_Pawn);
 		MeshComp->SetCollisionResponseToAllChannels(ECR_Ignore);
 		MeshComp->SetCollisionResponseToChannel(COLLISION_WEAPON, ECR_Block);
-		// 命中走 Physics Asset 的简化碰撞体 —— 角色 Mesh 必须配 Physics Asset，否则射线打不中。
 		MeshComp->SetGenerateOverlapEvents(false);
 	}
 
-	// 背包组件（服务端权威，复制给本人）。
 	Inventory = CreateDefaultSubobject<UFPSInventoryComponent>(TEXT("Inventory"));
+}
+
+AFPSWeapon* AFPSCharacter::GetWeaponInSlot(int32 Slot) const
+{
+	return Slot == 0 ? CurrentWeapon : (Slot == 1 ? SecondaryWeapon : nullptr);
+}
+
+AFPSWeapon* AFPSCharacter::GetActiveWeapon() const
+{
+	return ActiveWeaponSlot == 0 ? CurrentWeapon : SecondaryWeapon;
 }
 
 void AFPSCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// 武器仅在服务端生成（权威版本，bReplicates=true，负责开火/伤害）。
-	// 客户端不生成本地武器 —— 服务端 CurrentWeapon 复制到客户端后，
-	// OnRep_CurrentWeapon 触发 OnWeaponEquipped。
+	// Weapons are only spawned on the server.
 	if (HasAuthority() && WeaponClass && !CurrentWeapon)
 	{
 		CurrentWeapon = GetWorld()->SpawnActorDeferred<AFPSWeapon>(WeaponClass, FTransform::Identity, this, this);
@@ -69,14 +70,9 @@ void AFPSCharacter::BeginPlay()
 		{
 			CurrentWeapon->SetOwningCharacter(this);
 			CurrentWeapon->FinishSpawning(FTransform::Identity);
-			// 服务端权威：装满弹夹 + 初始备弹，复制到客户端
 			CurrentWeapon->ServerResetAmmo();
 		}
 
-		// 服务端在下一帧触发 OnWeaponEquipped：
-		// FinishSpawning 同步完成 Weapon BeginPlay，但其蓝图组件（Skeletal Mesh）
-		// 可能在事件 BeginPlay 中动态构造。延迟一帧确保蓝图层 AttachToComponent
-		// 拿到的 mesh 已完全就绪 —— 这是 Listen Server host 看不到自己武器的根因。
 		if (CurrentWeapon)
 		{
 			GetWorld()->GetTimerManager().SetTimerForNextTick([this]()
@@ -93,8 +89,6 @@ void AFPSCharacter::BeginPlay()
 	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
 	GetCharacterMovement()->JumpZVelocity = JumpZVelocity;
 
-	// 本地控制端在下一帧注册 IMC：BeginPlay 时 Controller 可能尚未 Possess。
-	// IMC / InputActions 由蓝图资产提供（在子类 default 中赋值），不再动态创建。
 	GetWorld()->GetTimerManager().SetTimerForNextTick([this]()
 	{
 		if (!IsLocallyControlled() || !InputMappingContext)
@@ -121,26 +115,21 @@ void AFPSCharacter::Tick(float DeltaTime)
 
 	if (HasAuthority() && !bIsDead)
 	{
-		// 体力先于速度更新：UpdateStamina 可能在耗尽时强制停跑（改 MovementState），
-		// 紧接着 ApplyMovementSpeed 立即把速度切回 WalkSpeed，无延迟。
 		UpdateStamina(DeltaTime);
 		ApplyMovementSpeed();
 	}
 
-	// 所有本地控制的角色：从本地 Controller 读 Pitch
-	// ArmPitch 是 Replicated，服务端赋值后自动复制到所有客户端
 	if (!bIsDead && IsLocallyControlled() && Controller)
 	{
 		const float CurrentPitch = Controller->GetControlRotation().GetNormalized().Pitch;
 		ArmPitch = CurrentPitch;
 
-		// Listen Server host already has authority — no RPC needed, replication does the work.
-		// Pure clients must send their pitch to server via RPC.
 		if (!HasAuthority())
 			ServerUpdateAimPitch(CurrentPitch);
 	}
 
-	WeaponFireState = (CurrentWeapon && CurrentWeapon->IsFiring())
+	AFPSWeapon* ActiveWeapon = GetActiveWeapon();
+	WeaponFireState = (ActiveWeapon && ActiveWeapon->IsFiring())
 		? EFPSWeaponFireState::Firing
 		: EFPSWeaponFireState::Idle;
 }
@@ -159,10 +148,18 @@ void AFPSCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		}
 	}
 
-	if (CurrentWeapon && HasAuthority())
+	if (HasAuthority())
 	{
-		CurrentWeapon->Destroy();
-		CurrentWeapon = nullptr;
+		if (CurrentWeapon && !CurrentWeapon->IsOnGround())
+		{
+			CurrentWeapon->Destroy();
+			CurrentWeapon = nullptr;
+		}
+		if (SecondaryWeapon && !SecondaryWeapon->IsOnGround())
+		{
+			SecondaryWeapon->Destroy();
+			SecondaryWeapon = nullptr;
+		}
 	}
 
 	Super::EndPlay(EndPlayReason);
@@ -170,7 +167,8 @@ void AFPSCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 bool AFPSCharacter::IsFiring() const
 {
-	return CurrentWeapon && CurrentWeapon->IsFiring();
+	AFPSWeapon* W = GetActiveWeapon();
+	return W && W->IsFiring();
 }
 
 void AFPSCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -180,7 +178,13 @@ void AFPSCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLif
 	DOREPLIFETIME_CONDITION(AFPSCharacter, Stamina, COND_None);
 	DOREPLIFETIME_CONDITION(AFPSCharacter, bIsDead, COND_None);
 	DOREPLIFETIME_CONDITION(AFPSCharacter, CurrentWeapon, COND_None);
+	DOREPLIFETIME_CONDITION(AFPSCharacter, SecondaryWeapon, COND_None);
+	DOREPLIFETIME_CONDITION(AFPSCharacter, ActiveWeaponSlot, COND_None);
 	DOREPLIFETIME_CONDITION(AFPSCharacter, ArmPitch, COND_None);
+	DOREPLIFETIME_CONDITION(AFPSCharacter, bIsUsingItem, COND_OwnerOnly);
+	DOREPLIFETIME_CONDITION(AFPSCharacter, ItemUseTotalDuration, COND_OwnerOnly);
+	DOREPLIFETIME_CONDITION(AFPSCharacter, bItemUseCompleted, COND_OwnerOnly);
+	DOREPLIFETIME_CONDITION(AFPSCharacter, HoTState, COND_OwnerOnly);
 }
 
 float AFPSCharacter::TakeDamage(float Damage, FDamageEvent const& DamageEvent,
@@ -192,16 +196,12 @@ float AFPSCharacter::TakeDamage(float Damage, FDamageEvent const& DamageEvent,
 	float ActualDamage = Super::TakeDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
 	Health = FMath::Clamp(Health - ActualDamage, 0.0f, MaxHealth);
 
-	// 计分板「造成的总伤害」：把权威 ActualDamage 累加到攻击者的 PlayerState。
-	// 排除自伤（攻击者就是自己）——自伤不计入战绩。EventInstigator 命中环境/世界时可能为空。
 	if (ActualDamage > 0.0f && EventInstigator && EventInstigator != GetController())
 	{
 		if (AFPSPlayerState* AttackerPS = EventInstigator->GetPlayerState<AFPSPlayerState>())
 			AttackerPS->AddDamage(ActualDamage);
 	}
 
-	// 服务端本机广播血量变化（客户端靠 OnRep_Health）。Die 内会再设 Health=0，
-	// 但此处先播一次保证 listen server host 的血条即时更新。
 	OnHealthChanged.Broadcast(Health, MaxHealth);
 
 	if (Health <= 0.0f)
@@ -218,13 +218,17 @@ void AFPSCharacter::Die(AController* Killer)
 	bIsDead = true;
 	Health = 0.0f;
 
-	// 服务端权威状态：停火、禁用移动。
+	CancelItemUse();
+	DeactivateHoT();
+
+	// Stop fire on all equipped weapons.
 	if (CurrentWeapon)
 		CurrentWeapon->StopFire();
+	if (SecondaryWeapon)
+		SecondaryWeapon->StopFire();
+
 	GetCharacterMovement()->DisableMovement();
 
-	// 服务端本机的表现（隐藏网格/武器、关碰撞、播死亡相机）。
-	// 客户端通过 OnRep_bIsDead 触发同样的表现 —— 见下方。
 	SetDeathPresentation(true);
 	OnDeathStart();
 
@@ -234,8 +238,71 @@ void AFPSCharacter::Die(AController* Killer)
 	if (AFPSPlayerState* VPS = GetPlayerState<AFPSPlayerState>())
 		VPS->AddDeath();
 
+	// Drop the highest-value weapon, destroy the other.
+	AFPSWeapon* WeaponToDrop = nullptr;
+	if (CurrentWeapon && SecondaryWeapon)
+	{
+		WeaponToDrop = (CurrentWeapon->GetWeaponValue() >= SecondaryWeapon->GetWeaponValue())
+			? CurrentWeapon.Get() : SecondaryWeapon.Get();
+	}
+	else if (CurrentWeapon)
+	{
+		WeaponToDrop = CurrentWeapon;
+	}
+	else if (SecondaryWeapon)
+	{
+		WeaponToDrop = SecondaryWeapon;
+	}
+
+	if (WeaponToDrop)
+	{
+		const bool bDroppedActive = (WeaponToDrop == GetActiveWeapon());
+		const int32 DroppedSlot = (WeaponToDrop == CurrentWeapon) ? 0 : 1;
+
+		// Detach from character and place in world.
+		const FVector SpawnLoc = GetActorLocation()
+			+ GetActorForwardVector() * 80.0f
+			+ FVector(0, 0, -40.0f);
+		WeaponToDrop->PlaceInWorld(SpawnLoc);
+
+		if (DroppedSlot == 0)
+			CurrentWeapon = nullptr;
+		else
+			SecondaryWeapon = nullptr;
+
+		// Destroy the remaining weapon.
+		if (DroppedSlot == 0 && SecondaryWeapon)
+		{
+			SecondaryWeapon->Destroy();
+			SecondaryWeapon = nullptr;
+		}
+		else if (DroppedSlot == 1 && CurrentWeapon)
+		{
+			CurrentWeapon->Destroy();
+			CurrentWeapon = nullptr;
+		}
+
+		// If we dropped the active weapon, switch to the surviving one.
+		if (bDroppedActive && SecondaryWeapon)
+			ActiveWeaponSlot = 1;
+		else if (bDroppedActive && CurrentWeapon)
+			ActiveWeaponSlot = 0;
+	}
+
 	if (AFPSGameMode* GM = Cast<AFPSGameMode>(GetWorld()->GetAuthGameMode()))
 		GM->OnPlayerDied(GetController(), Killer);
+}
+
+void AFPSCharacter::DropWeaponAsPickup(AFPSWeapon* Weapon)
+{
+	if (!HasAuthority() || !Weapon)
+		return;
+
+	const FVector SpawnLoc = GetActorLocation()
+		+ GetActorForwardVector() * 80.0f
+		+ FVector(0, 0, -40.0f);
+
+	Weapon->PlaceInWorld(SpawnLoc);
 }
 
 void AFPSCharacter::Respawn(const FVector& SpawnLocation, const FRotator& SpawnRotation)
@@ -243,14 +310,11 @@ void AFPSCharacter::Respawn(const FVector& SpawnLocation, const FRotator& SpawnR
 	if (!HasAuthority())
 		return;
 
-	// 1) 传送到出生点。bIsDead 还是 true 时碰撞已关，传送不会被卡。
 	SetActorLocationAndRotation(SpawnLocation, SpawnRotation, /*bSweep=*/false);
 
-	// 让本地控制端的视角也对准出生朝向（否则复活后还看着死前的方向）。
 	if (AController* C = GetController())
 		C->SetControlRotation(SpawnRotation);
 
-	// 2) 复位权威状态：满血、恢复移动。
 	Health = MaxHealth;
 	bWantsToRun = false;
 	bWantsToAim = false;
@@ -258,50 +322,66 @@ void AFPSCharacter::Respawn(const FVector& SpawnLocation, const FRotator& SpawnR
 	GetCharacterMovement()->SetMovementMode(MOVE_Walking);
 	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
 
-	// 服务端本机刷血条（客户端靠 OnRep_Health）。
 	OnHealthChanged.Broadcast(Health, MaxHealth);
 
-	// 复活补满体力，复制到客户端刷 UI。
 	Stamina = MaxStamina;
 	OnStaminaChanged.Broadcast(Stamina, MaxStamina);
 
-	// 复活补满弹药（满夹 + 初始备弹），复制到客户端刷 UI。
+	// Reset surviving weapon ammo; respawn default if only weapon was dropped.
 	if (CurrentWeapon)
+	{
 		CurrentWeapon->ServerResetAmmo();
+	}
+	else if (WeaponClass)
+	{
+		CurrentWeapon = GetWorld()->SpawnActorDeferred<AFPSWeapon>(WeaponClass, FTransform::Identity, this, this);
+		if (CurrentWeapon)
+		{
+			CurrentWeapon->SetOwningCharacter(this);
+			CurrentWeapon->FinishSpawning(FTransform::Identity);
+			CurrentWeapon->ServerResetAmmo();
 
-	// 3) 清死亡状态（复制到客户端 → OnRep_bIsDead 复位各端表现）。
+			GetWorld()->GetTimerManager().SetTimerForNextTick([this]()
+			{
+				if (CurrentWeapon)
+					OnWeaponEquipped();
+			});
+		}
+	}
+
+	if (SecondaryWeapon)
+		SecondaryWeapon->ServerResetAmmo();
+
 	bIsDead = false;
 
-	// 4) 服务端本机表现复位（客户端走 OnRep_bIsDead）。
+	ClearItemUseState();
+	DeactivateHoT();
+
 	SetDeathPresentation(false);
 	OnRespawn();
 }
 
 void AFPSCharacter::SetDeathPresentation(bool bDead)
 {
-	// 纯本地表现，每端各自执行。隐藏尸体网格 + 武器，关闭/恢复碰撞。
 	if (USkeletalMeshComponent* MeshComp = GetMesh())
 		MeshComp->SetVisibility(!bDead, /*bPropagateToChildren=*/true);
 
 	if (CurrentWeapon)
 		CurrentWeapon->SetActorHiddenInGame(bDead);
 
-	// 死亡：完全关碰撞（子弹穿过尸体、不挡活人移动）。
-	// 复活：恢复碰撞。
+	if (SecondaryWeapon)
+		SecondaryWeapon->SetActorHiddenInGame(bDead);
+
 	SetActorEnableCollision(!bDead);
 }
 
 void AFPSCharacter::OnRep_Health(float OldHealth)
 {
-	// 客户端收到服务端权威血量 → 广播给 UI / 蓝图刷血条。
 	OnHealthChanged.Broadcast(Health, MaxHealth);
 }
 
 void AFPSCharacter::OnRep_CurrentWeapon(AFPSWeapon* OldWeapon)
 {
-	// 客户端收到服务端复制武器（首次或替换），每个角色仅触发一次 OnWeaponEquipped。
-	// 不在客户端调用 OldWeapon->Destroy() —— 客户端无权销毁 replicated actor，
-	// 服务端销毁后会通过复制通道传到客户端。
 	if (CurrentWeapon && !bWeaponEquipped)
 	{
 		bWeaponEquipped = true;
@@ -309,10 +389,25 @@ void AFPSCharacter::OnRep_CurrentWeapon(AFPSWeapon* OldWeapon)
 	}
 }
 
+void AFPSCharacter::OnRep_SecondaryWeapon(AFPSWeapon* OldWeapon)
+{
+	if (SecondaryWeapon)
+	{
+		SecondaryWeapon->SetActorHiddenInGame(true);
+		OnSecondaryWeaponEquipped();
+	}
+}
+
+void AFPSCharacter::OnRep_ActiveWeaponSlot()
+{
+	if (CurrentWeapon)
+		CurrentWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 0);
+	if (SecondaryWeapon)
+		SecondaryWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 1);
+}
+
 void AFPSCharacter::OnRep_bIsDead()
 {
-	// 客户端镜像服务端的死亡/复活表现。权威移动/碰撞由服务端控制，
-	// 这里客户端也同步关/开本地碰撞与表现，并触发蓝图死亡相机事件。
 	if (bIsDead)
 	{
 		SetDeathPresentation(true);
@@ -341,7 +436,6 @@ void AFPSCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompon
 		return;
 	}
 
-	// 本地玩家隐藏第三人称身体；武器的 OwnerNoSee 由蓝图层在 OnWeaponEquipped 中设置
 	if (IsLocallyControlled())
 	{
 		GetMesh()->SetOwnerNoSee(true);
@@ -396,10 +490,20 @@ void AFPSCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompon
 	{
 		EIC->BindAction(InputInventory, ETriggerEvent::Started, this, &AFPSCharacter::ToggleInventory);
 	}
+
+	if (InputSwitchWeapon1)
+	{
+		EIC->BindAction(InputSwitchWeapon1, ETriggerEvent::Started, this, &AFPSCharacter::SwitchToPrimaryWeapon);
+	}
+
+	if (InputSwitchWeapon2)
+	{
+		EIC->BindAction(InputSwitchWeapon2, ETriggerEvent::Started, this, &AFPSCharacter::SwitchToSecondaryWeapon);
+	}
 }
 
 // ---------------------------------------------------------------------------
-// 移动 (Axis2D, X=Forward, Y=Right)
+// Move (Axis2D, X=Forward, Y=Right)
 // ---------------------------------------------------------------------------
 
 void AFPSCharacter::Move(const FInputActionValue& Value)
@@ -434,7 +538,7 @@ void AFPSCharacter::MoveCompleted(const FInputActionValue& Value)
 
 void AFPSCharacter::StartRun()
 {
-	if (bInputLocked)
+	if (IsActionLocked())
 		return;
 	bWantsToRun = true;
 	OnRunStarted.Broadcast();
@@ -450,7 +554,6 @@ void AFPSCharacter::StopRun()
 	OnRunStopped.Broadcast();
 	ServerSetWantsToRun(false);
 
-	// 奔跑打断开火后，松开 Shift 时若 LMB 仍按住且允许自动恢复，则恢复开火
 	if (bAutoResumeFireAfterRun && bWantsToFire && !bIsDead)
 	{
 		OnFireStarted.Broadcast();
@@ -460,11 +563,9 @@ void AFPSCharacter::StopRun()
 
 void AFPSCharacter::StartAim()
 {
-	if (bInputLocked)
+	if (IsActionLocked())
 		return;
 
-	// 计分板打开期间，右键不瞄准 —— 改为 toggle 鼠标锁定（未锁→锁，已锁→解锁）。
-	// 这样：面板开但未锁时右键去锁鼠标（左键仍可射击）；锁后右键再按解锁回正常游戏。
 	if (AFPSPlayerController* PC = Cast<AFPSPlayerController>(GetController()))
 	{
 		if (PC->IsScoreboardOpen())
@@ -481,7 +582,6 @@ void AFPSCharacter::StartAim()
 
 void AFPSCharacter::StopAim()
 {
-	// 计分板打开期间右键被挪作 toggle 鼠标锁定，按下时没进入瞄准；松开时也不必走停瞄逻辑。
 	if (AFPSPlayerController* PC = Cast<AFPSPlayerController>(GetController()))
 	{
 		if (PC->IsScoreboardOpen())
@@ -495,8 +595,6 @@ void AFPSCharacter::StopAim()
 
 void AFPSCharacter::ServerSetWantsToRun_Implementation(bool bNewWantsToRun)
 {
-	// 起跑准入门槛：从其他状态进入奔跑时，体力必须 > 起跑线才放行。
-	// 这只限制"起跑那一刻"；一旦跑起来，体力跌破阈值仍可继续跑，直到 UpdateStamina 在 0 时强制停。
 	if (bNewWantsToRun && Stamina <= RunStartStaminaThreshold)
 		return;
 
@@ -529,7 +627,6 @@ void AFPSCharacter::ServerSetWantsToAim_Implementation(bool bNewWantsToAim)
 
 void AFPSCharacter::MulticastOnAimStateChanged_Implementation(bool bNewWantsToAim)
 {
-	// 发送方（按 RMB 的客户端）已在 StartAim/StopAim 中本地广播，跳过避免重复
 	if (IsLocallyControlled())
 		return;
 
@@ -545,10 +642,9 @@ void AFPSCharacter::MulticastOnAimStateChanged_Implementation(bool bNewWantsToAi
 
 void AFPSCharacter::StartFire()
 {
-	if (bIsDead || bInputLocked)
+	if (IsActionLocked())
 		return;
 
-	// 计分板锁鼠标后，左键点击进 UI（点排序按钮），不开火。
 	if (IsScoreboardMouseLocked())
 		return;
 
@@ -556,10 +652,7 @@ void AFPSCharacter::StartFire()
 	if(MovementState == EFPSMovementState::Running)
 		return;
 
-	// 本地广播 OnFireStarted（0 延迟），蓝图层负责所有特效（粒子/音效/动画/连发 timer）
 	OnFireStarted.Broadcast();
-
-	// 服务端权威：LineTrace + 伤害判定走 RPC
 	ServerStartFire();
 }
 
@@ -569,32 +662,28 @@ void AFPSCharacter::StopFire()
 	OnFireStopped.Broadcast();
 	ServerStopFire();
 
-	// 打空弹夹后松开开火键 → 自动换弹。
-	// 只在弹夹真的空了（CurrentAmmo<=0）时触发；弹夹还有子弹时松手不换（玩家想提前换自行按 R）。
-	// Reload() 内部有 CanReload 本地预判 + ServerReload 服务端权威兜底，半 RTT 的弹药延迟不会误触。
-	if (CurrentWeapon && CurrentWeapon->GetCurrentAmmo() <= 0)
+	AFPSWeapon* ActiveWeapon = GetActiveWeapon();
+	if (ActiveWeapon && ActiveWeapon->GetCurrentAmmo() <= 0)
 		Reload();
 }
 
 void AFPSCharacter::ServerStartFire_Implementation()
 {
-	if (CurrentWeapon)
-		CurrentWeapon->StartFire();
+	AFPSWeapon* ActiveWeapon = GetActiveWeapon();
+	if (ActiveWeapon)
+		ActiveWeapon->StartFire();
 	MulticastOnFireStateChanged(true);
 }
 
 void AFPSCharacter::ServerStopFire_Implementation()
 {
-	if (CurrentWeapon)
-		CurrentWeapon->StopFire();
+	AFPSWeapon* ActiveWeapon = GetActiveWeapon();
+	if (ActiveWeapon)
+		ActiveWeapon->StopFire();
 	MulticastOnFireStateChanged(false);
 
-	// 服务端权威兜底：松开开火键时若弹夹空了，直接换弹。
-	// 本地 StopFire 已尝试过 Reload()，但最后一发扣减可能晚于本地松手 → 本地漏判。
-	// 服务端这里用权威 CurrentAmmo 再判一次，保证打空必换。
-	// ServerBeginReload 内有 CanReload 守卫，与本地 Reload 重复调用不会换两次。
-	if (CurrentWeapon && CurrentWeapon->GetCurrentAmmo() <= 0)
-		CurrentWeapon->ServerBeginReload();
+	if (ActiveWeapon && ActiveWeapon->GetCurrentAmmo() <= 0)
+		ActiveWeapon->ServerBeginReload();
 }
 
 // ---------------------------------------------------------------------------
@@ -603,30 +692,231 @@ void AFPSCharacter::ServerStopFire_Implementation()
 
 void AFPSCharacter::Reload()
 {
-	if (bIsDead || bInputLocked || !CurrentWeapon)
+	AFPSWeapon* ActiveWeapon = GetActiveWeapon();
+	if (IsActionLocked() || !ActiveWeapon)
 		return;
 
-	// 本地预判：不能换弹（满夹/无备弹/换弹中）直接忽略，省一次 RPC。
-	// 真正的换弹由服务端权威执行（CanReload 在服务端再校验一次）。
-	if (!CurrentWeapon->CanReload())
+	if (!ActiveWeapon->CanReload())
 		return;
 
-	// 不在此处直接起进度条：换弹是 reliable RPC，服务端立即把 bIsReloading 复制回来，
-	// 经 Weapon 的 OnRep_IsReloading→BeginProgress(Reload) 统一驱动进度条（所有端同源），
-	// 避免本地预判与服务端信号双重触发，也避免服务端 CanReload 不过时进度条空转。
 	ServerReload();
 }
 
 void AFPSCharacter::ServerReload_Implementation()
 {
-	if (bIsDead || !CurrentWeapon)
+	if (bIsDead)
 		return;
 
-	CurrentWeapon->ServerBeginReload();
+	AFPSWeapon* ActiveWeapon = GetActiveWeapon();
+	if (ActiveWeapon)
+		ActiveWeapon->ServerBeginReload();
+}
+
+void AFPSCharacter::ServerCancelUseItem_Implementation()
+{
+	CancelItemUse();
 }
 
 // ---------------------------------------------------------------------------
-// 持续动作进度条（本地表现，单进度模型 — 同时只有一个活跃进度）
+// Weapon switching
+// ---------------------------------------------------------------------------
+
+void AFPSCharacter::SwitchWeapon(int32 NewSlot)
+{
+	if (NewSlot < 0 || NewSlot > 1 || NewSlot == ActiveWeaponSlot)
+		return;
+
+	AFPSWeapon* NewWeapon = GetWeaponInSlot(NewSlot);
+	if (!NewWeapon)
+		return;
+
+	// Stop firing/aiming on current active weapon.
+	if (bWantsToFire)
+		StopFire();
+	if (bWantsToAim)
+		StopAim();
+
+	ServerSwitchWeapon(NewSlot);
+}
+
+void AFPSCharacter::SwitchToPrimaryWeapon()
+{
+	if (!IsLocallyControlled())
+		return;
+
+	if (!SecondaryWeapon || ActiveWeaponSlot == 0)
+		return;
+
+	SwitchWeapon(0);
+}
+
+void AFPSCharacter::SwitchToSecondaryWeapon()
+{
+	if (!IsLocallyControlled())
+		return;
+
+	if (!SecondaryWeapon || ActiveWeaponSlot == 1)
+		return;
+
+	SwitchWeapon(1);
+}
+
+void AFPSCharacter::ServerSwitchWeapon_Implementation(int32 NewSlot)
+{
+	if (!HasAuthority() || NewSlot < 0 || NewSlot > 1 || NewSlot == ActiveWeaponSlot)
+		return;
+
+	AFPSWeapon* NewWeapon = GetWeaponInSlot(NewSlot);
+	if (!NewWeapon)
+		return;
+
+	// Stop old weapon fire.
+	AFPSWeapon* OldWeapon = GetActiveWeapon();
+	if (OldWeapon)
+		OldWeapon->StopFire();
+
+	// Switch slot. Visibility updates on all clients via OnRep_ActiveWeaponSlot.
+	ActiveWeaponSlot = NewSlot;
+
+	// Server host manually toggles visibility.
+	if (CurrentWeapon)
+		CurrentWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 0);
+	if (SecondaryWeapon)
+		SecondaryWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 1);
+}
+
+void AFPSCharacter::EquipWeapon(AFPSWeapon* Weapon, int32 Slot)
+{
+	if (!HasAuthority() || !Weapon || Slot < 0 || Slot > 1)
+		return;
+
+	Weapon->RemoveFromWorld();
+	Weapon->SetOwningCharacter(this);
+	Weapon->ServerResetAmmo();
+
+	if (Slot == 0)
+	{
+		CurrentWeapon = Weapon;
+	}
+	else
+	{
+		SecondaryWeapon = Weapon;
+	}
+
+	// Set visibility based on active slot.
+	if (CurrentWeapon)
+		CurrentWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 0);
+	if (SecondaryWeapon)
+		SecondaryWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 1);
+
+	if (Slot == 0)
+		OnWeaponEquipped();
+	else
+		OnSecondaryWeaponEquipped();
+}
+
+// ---------------------------------------------------------------------------
+// Weapon pickup
+// ---------------------------------------------------------------------------
+
+void AFPSCharacter::SetWeaponPickupTarget(AFPSWeapon* Weapon)
+{
+	if (CurrentWeaponPickupTarget == Weapon)
+		return;
+
+	CurrentWeaponPickupTarget = Weapon;
+	OnWeaponPickupTargetChanged.Broadcast();
+}
+
+void AFPSCharacter::ClearWeaponPickupTarget(AFPSWeapon* Weapon)
+{
+	if (CurrentWeaponPickupTarget != Weapon)
+		return;
+
+	CurrentWeaponPickupTarget = nullptr;
+	OnWeaponPickupTargetChanged.Broadcast();
+}
+
+AFPSWeapon* AFPSCharacter::FindBestWeaponPickupInRange() const
+{
+	UWorld* World = GetWorld();
+	if (!World)
+		return nullptr;
+
+	const FVector Origin = GetActorLocation();
+	const float QueryRadius = 300.0f;
+
+	TArray<FOverlapResult> Overlaps;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(FindWeaponPickup), false, this);
+	World->OverlapMultiByObjectType(
+		Overlaps,
+		Origin,
+		FQuat::Identity,
+		FCollisionObjectQueryParams(ECC_WorldDynamic),
+		FCollisionShape::MakeSphere(QueryRadius),
+		Params);
+
+	AFPSWeapon* Best = nullptr;
+	float BestDistSq = TNumericLimits<float>::Max();
+	for (const FOverlapResult& O : Overlaps)
+	{
+		AFPSWeapon* Weapon = Cast<AFPSWeapon>(O.GetActor());
+		if (!Weapon || !Weapon->IsOnGround())
+			continue;
+
+		const float DistSq = FVector::DistSquared(Origin, Weapon->GetActorLocation());
+		const float R = Weapon->GetPickupRadius();
+		if (DistSq <= R * R && DistSq < BestDistSq)
+		{
+			Best = Weapon;
+			BestDistSq = DistSq;
+		}
+	}
+	return Best;
+}
+
+void AFPSCharacter::ServerTryPickupWeapon_Implementation()
+{
+	if (!HasAuthority())
+		return;
+
+	AFPSWeapon* Weapon = FindBestWeaponPickupInRange();
+	if (!Weapon)
+		return;
+
+	// 0 guns: equip as primary.
+	if (!CurrentWeapon && !SecondaryWeapon)
+	{
+		EquipWeapon(Weapon, 0);
+		return;
+	}
+
+	// 1 gun: equip to free slot.
+	if (!CurrentWeapon)
+	{
+		EquipWeapon(Weapon, 0);
+		return;
+	}
+	if (!SecondaryWeapon)
+	{
+		EquipWeapon(Weapon, 1);
+		return;
+	}
+
+	// 2 guns: swap with active weapon - drop old, equip new.
+	AFPSWeapon* OldWeapon = GetActiveWeapon();
+	const int32 Slot = ActiveWeaponSlot;
+
+	const FVector SpawnLoc = GetActorLocation()
+		+ GetActorForwardVector() * 80.0f
+		+ FVector(0, 0, -40.0f);
+	OldWeapon->PlaceInWorld(SpawnLoc);
+
+	EquipWeapon(Weapon, Slot);
+}
+
+// ---------------------------------------------------------------------------
+// Progress bar
 // ---------------------------------------------------------------------------
 
 void AFPSCharacter::BeginProgress(EFPSProgressType Type, float Duration)
@@ -634,9 +924,6 @@ void AFPSCharacter::BeginProgress(EFPSProgressType Type, float Duration)
 	if (Type == EFPSProgressType::None)
 		return;
 
-	// 已有别的进度在跑 → 先打断它（bCompleted=false），再开新进度。
-	// 这天然实现"换弹打断用药"等需求：新动作开始即顶替旧动作。
-	// TODO 未来可能有bug，可能同一事件多次触发，比如多个同种药物前后分别使用
 	if (ActiveProgress != EFPSProgressType::None)
 		OnProgressEnd.Broadcast(ActiveProgress, false);
 
@@ -646,8 +933,6 @@ void AFPSCharacter::BeginProgress(EFPSProgressType Type, float Duration)
 
 void AFPSCharacter::EndProgress(EFPSProgressType Type, bool bCompleted)
 {
-	// 仅当结束的正是当前活跃进度才处理：若该进度已被新动作打断顶替，
-	// 此处的旧结束信号应被忽略，避免误关掉新进度条。
 	if (ActiveProgress != Type)
 		return;
 
@@ -658,12 +943,6 @@ void AFPSCharacter::EndProgress(EFPSProgressType Type, bool bCompleted)
 void AFPSCharacter::ServerUpdateAimPitch_Implementation(float Pitch)
 {
 	ArmPitch = Pitch;
-	static int32 LogCounter = 0;
-	if (++LogCounter <= 10)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[Pitch] ServerUpdateAimPitch(%.1f) for %s | LocallyControlled=%d"),
-			Pitch, *GetName(), IsLocallyControlled());
-	}
 }
 
 void AFPSCharacter::MulticastOnFireStateChanged_Implementation(bool bNewFiring)
@@ -677,27 +956,20 @@ void AFPSCharacter::MulticastOnFireStateChanged_Implementation(bool bNewFiring)
 		OnFireStopped.Broadcast();
 }
 
-// 有命中的时候在攻击者角色实例上调用，分发三条通知（按本机角色身份分发）：
 void AFPSCharacter::DispatchHitFX(const FVector& ImpactPoint, const FVector& ImpactNormal,
 	float Damage, AFPSCharacter* Victim)
 {
-	// 本函数在每端的攻击者角色实例上执行（由武器的 MulticastHitConfirmed 调用）。
-	// 三条通知都是纯本地表现，按本机角色身份分发：
-
-	// 1) 攻击者本机 —— hitmarker / 命中音 / 准星打勾
 	if (IsLocallyControlled())
 		OnDealtHit.Broadcast(ImpactPoint, ImpactNormal, Damage, Victim);
 
-	// 2) 被命中角色本机 —— 受伤镜头模糊 / 受击抖动（仅命中角色且该角色由本机控制时）
 	if (Victim && Victim->IsLocallyControlled())
 		Victim->OnReceivedHit.Broadcast(ImpactPoint, ImpactNormal, Damage, Victim);
 
-	// 3) 世界共享表现 —— 命中音效 / 冲击特效 / 权威弹道（所有端无条件）
 	OnHitWorld.Broadcast(ImpactPoint, ImpactNormal, Damage, Victim);
 }
 
 // ---------------------------------------------------------------------------
-// 鼠标视角 (Axis2D, X=Yaw, Y=Pitch)
+// Mouse look
 // ---------------------------------------------------------------------------
 
 void AFPSCharacter::Look(const FInputActionValue& Value)
@@ -715,7 +987,7 @@ void AFPSCharacter::Look(const FInputActionValue& Value)
 }
 
 // ---------------------------------------------------------------------------
-// 移动状态
+// Movement state
 // ---------------------------------------------------------------------------
 
 void AFPSCharacter::UpdateMovementState()
@@ -730,24 +1002,22 @@ void AFPSCharacter::UpdateMovementState()
 	const float VelocityLength = Velocity.Length();
 	const bool bIsMoving = VelocityLength > UE_KINDA_SMALL_NUMBER;
 
-	// 用控制器朝向计算角色的向前速度（和蓝图逻辑一致）
 	const FRotator ControlRotation = Controller->GetControlRotation();
 	const FRotator YawOnlyRotation(0, ControlRotation.Yaw, 0);
 	const FVector ForwardDir = YawOnlyRotation.RotateVector(FVector::ForwardVector);
-	const float ForwardSpeed = Velocity.Dot(ForwardDir); // 角色"前方"的速度分量
+	const float ForwardSpeed = Velocity.Dot(ForwardDir);
 
 	if (bWantsToAim)
 	{
 		MovementState = EFPSMovementState::Aiming;
 	}
-	else if (ForwardSpeed > UE_KINDA_SMALL_NUMBER) // 向前移动
+	else if (ForwardSpeed > UE_KINDA_SMALL_NUMBER)
 	{
 		if (bWantsToRun && (Stamina >= RunStartStaminaThreshold || MovementState == EFPSMovementState::Running))
 		{
 			MovementState = EFPSMovementState::Running;
-			// 奔跑优先于开火：切换跑步时强制停火
-			// 不调用 StopFire()，避免把 bWantsToFire 清掉（LMB 仍按住）
-			if (CurrentWeapon && CurrentWeapon->IsFiring())
+			AFPSWeapon* ActiveWeapon = GetActiveWeapon();
+			if (ActiveWeapon && ActiveWeapon->IsFiring())
 			{
 				OnFireStopped.Broadcast();
 				if (HasAuthority() || IsLocallyControlled())
@@ -759,7 +1029,7 @@ void AFPSCharacter::UpdateMovementState()
 			MovementState = EFPSMovementState::Walking;
 		}
 	}
-	else if (bIsMoving) // 移动并且没有向前分量 -> 只有左右/向后移动
+	else if (bIsMoving)
 	{
 		MovementState = EFPSMovementState::Walking;
 	}
@@ -779,28 +1049,24 @@ void AFPSCharacter::ApplyMovementSpeed()
 	case EFPSMovementState::Running:
 		GetCharacterMovement()->MaxWalkSpeed = RunSpeed;
 		break;
-	default: // Idle, Walking
+	default:
 		GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
 		break;
 	}
 }
 
 // ---------------------------------------------------------------------------
-// 体力（服务端权威，Tick 中更新；复制到客户端给 UI）
+// Stamina
 // ---------------------------------------------------------------------------
 
 void AFPSCharacter::UpdateStamina(float DeltaTime)
 {
-	// 仅服务端调用（Tick 中已 HasAuthority 守卫）。
 	const float OldStamina = Stamina;
 
 	if (MovementState == EFPSMovementState::Running)
 	{
-		// 真正在向前奔跑（MovementState 已是权威判定）→ 消耗体力。
 		Stamina = FMath::Max(0.0f, Stamina - StaminaDrainRate * DeltaTime);
 
-		// 只有体力彻底耗尽（到 0）才强制停跑：长按 Shift 会一直跑到 0。
-		// 起跑阈值是"准入门槛"，不是"退出线"—— 跌破阈值但 >0 时仍可继续跑（见 ServerSetWantsToRun）。
 		if (Stamina <= 0.0f)
 		{
 			ServerStopRunForced();
@@ -808,34 +1074,24 @@ void AFPSCharacter::UpdateStamina(float DeltaTime)
 	}
 	else
 	{
-		// 非奔跑 → 回复体力。Idle 与 Walking 用不同速率。
 		const float RegenRate = (MovementState == EFPSMovementState::Idle)
 			? StaminaRegenRateIdle
 			: StaminaRegenRateWalking;
 		Stamina = FMath::Min(MaxStamina, Stamina + RegenRate * DeltaTime);
 	}
 
-	// 体力变化才广播（避免满体力/空体力时每帧空播）。服务端本机靠此刷 UI，
-	// 客户端靠 OnRep_Stamina。UI 更顺滑的做法是 ProgressBar.Percent 绑 GetStamina/GetMaxStamina。
 	if (!FMath::IsNearlyEqual(Stamina, OldStamina))
 		OnStaminaChanged.Broadcast(Stamina, MaxStamina);
 }
 
 void AFPSCharacter::ServerStopRunForced()
 {
-	// 仅服务端调用。体力不足时由服务端发起的强制停跑 —— 玩家从没调过 StopRun，
-	// 所以要同时：① 清服务端 bWantsToRun ② 重算状态/速度 ③ 让所有端动画退出跑步
-	// ④ 通知操作者本机清本地 bWantsToRun 并播 OnRunStopped（否则本机动画卡在跑步）。
 	bWantsToRun = false;
-	UpdateMovementState();   // 重算 → 不再是 Running
-	ApplyMovementSpeed();    // 立即切回 WalkSpeed
+	UpdateMovementState();
+	ApplyMovementSpeed();
 
-	// 远端模拟代理（别人客户端上的本角色）靠 multicast 退出跑步动画。
 	MulticastOnRunStateChanged(false);
 
-	// 操作者本机：multicast 对 IsLocallyControlled() 会 return（设计上发送方自己跳过），
-	// 所以单独发 Client RPC 给操作者，清本地 bWantsToRun + 播 OnRunStopped。
-	// Listen server host 自己就是操作者且有 authority，直接本地处理，不走 RPC。
 	if (IsLocallyControlled())
 	{
 		OnRunStopped.Broadcast();
@@ -848,21 +1104,46 @@ void AFPSCharacter::ServerStopRunForced()
 
 void AFPSCharacter::ClientForceStopRun_Implementation()
 {
-	// 操作者客户端本机：清本地输入意图 + 退出跑步动画。
-	// 清 bWantsToRun 后，UpdateMovementState（每帧 Tick）就不会再判为 Running，
-	// 且玩家就算还按着 Shift，也需松开重按才会重新 StartRun（届时服务端按锁判断是否允许）。
 	bWantsToRun = false;
 	OnRunStopped.Broadcast();
 }
 
 void AFPSCharacter::OnRep_Stamina()
 {
-	// 客户端收到服务端权威体力 → 广播给 UI / 蓝图。
 	OnStaminaChanged.Broadcast(Stamina, MaxStamina);
 }
 
 // ---------------------------------------------------------------------------
-// 背包 / 道具系统
+// Interact (F key): Weapon pickup > Item pickup > Cancel item use
+// ---------------------------------------------------------------------------
+
+void AFPSCharacter::Interact()
+{
+	// F cancels item use.
+	if (bIsUsingItem)
+	{
+		ServerCancelUseItem();
+		return;
+	}
+
+	if (IsActionLocked())
+		return;
+
+	// Weapon pickup has priority over item pickup.
+	if (CurrentWeaponPickupTarget)
+	{
+		ServerTryPickupWeapon();
+		return;
+	}
+
+	if (!CurrentPickupTarget)
+		return;
+
+	ServerTryPickup();
+}
+
+// ---------------------------------------------------------------------------
+// Inventory / Item system
 // ---------------------------------------------------------------------------
 
 void AFPSCharacter::ServerApplyHeal(float Amount)
@@ -871,26 +1152,43 @@ void AFPSCharacter::ServerApplyHeal(float Amount)
 		return;
 
 	Health = FMath::Clamp(Health + Amount, 0.0f, MaxHealth);
-
-	// 服务端本机刷血条（客户端靠 OnRep_Health 复制后广播）。
 	OnHealthChanged.Broadcast(Health, MaxHealth);
 }
 
 void AFPSCharacter::UseInventoryItem(int32 Index)
 {
-	// 本地 UI 调用 → 转发服务端权威执行。Host 自己就有 authority，RPC 会本地直接跑。
+	AFPSWeapon* ActiveWeapon = GetActiveWeapon();
+	if (bIsDead || bIsUsingItem || (ActiveWeapon && ActiveWeapon->IsReloading()))
+		return;
+
+	if (bInventoryOpen)
+		CloseInventory();
+
 	ServerUseInventoryItem(Index);
 }
 
 void AFPSCharacter::ServerUseInventoryItem_Implementation(int32 Index)
 {
-	if (Inventory)
-		Inventory->ServerUseItem(Index);
+	if (!Inventory)
+		return;
+
+	AFPSWeapon* ActiveWeapon = GetActiveWeapon();
+	if (bIsDead || bIsUsingItem || (ActiveWeapon && ActiveWeapon->IsReloading()))
+		return;
+
+	FItemUseResult Result = Inventory->BeginItemUse(Index);
+	if (Result.UseType == EFPSItemUseType::None)
+		return;
+
+	if (Result.UseType == EFPSItemUseType::ChanneledHeal ||
+		Result.UseType == EFPSItemUseType::HoTApply)
+	{
+		StartItemUseProcess(Result);
+	}
 }
 
 void AFPSCharacter::DropInventoryItem(int32 Index)
 {
-	// 本地 UI 调用 → 转发服务端权威执行。
 	ServerDropInventoryItem(Index);
 }
 
@@ -900,27 +1198,13 @@ void AFPSCharacter::ServerDropInventoryItem_Implementation(int32 Index)
 		Inventory->ServerDropItem(Index);
 }
 
-void AFPSCharacter::Interact()
-{
-	// F 键：发起拾取。本地有 overlap 目标才发（避免空发 RPC），
-	// 但服务端不信任客户端的指针 —— 它自己重新查范围（见 ServerTryPickup_Implementation）。
-	if (CurrentPickupTarget)
-	{
-		ServerTryPickup();
-	}
-}
-
 AFPSPickup* AFPSCharacter::FindBestPickupInRange() const
 {
-	// 服务端权威：用球形重叠查角色周围的 Pickup，选最近的。
-	// 半径取「角色身位 + 各 Pickup 自己的 PickupRadius」—— 用一个够大的查询球先捞，
-	// 再按各 Pickup 的真实 PickupRadius 精确判定。
 	UWorld* World = GetWorld();
 	if (!World)
 		return nullptr;
 
 	const FVector Origin = GetActorLocation();
-	// 查询球半径用一个保守上限（覆盖常见 PickupRadius，默认 120）。
 	const float QueryRadius = 300.0f;
 
 	TArray<FOverlapResult> Overlaps;
@@ -942,7 +1226,6 @@ AFPSPickup* AFPSCharacter::FindBestPickupInRange() const
 			continue;
 
 		const float DistSq = FVector::DistSquared(Origin, Pickup->GetActorLocation());
-		// 各 Pickup 用自己的 PickupRadius 做最终范围校验（防越界拾取）。
 		const float R = Pickup->GetPickupRadius();
 		if (DistSq <= R * R && DistSq < BestDistSq)
 		{
@@ -973,11 +1256,9 @@ bool AFPSCharacter::IsScoreboardMouseLocked() const
 
 void AFPSCharacter::ToggleInventory()
 {
-	// E 键：纯本地 UI 切换。只在本地控制端有意义。
 	if (!IsLocallyControlled())
 		return;
 
-	// 计分板打开期间（Tab 按住）禁止开/关背包 —— 两个全屏 UI 互斥。
 	if (const AFPSPlayerController* PC = Cast<AFPSPlayerController>(GetController()))
 	{
 		if (PC->IsScoreboardOpen())
@@ -985,13 +1266,10 @@ void AFPSCharacter::ToggleInventory()
 	}
 
 	bInventoryOpen = !bInventoryOpen;
-
-	// 打开时锁住移动/射击等输入（E 键本身不锁，仍能退出）。
 	bInputLocked = bInventoryOpen;
 
 	if (bInventoryOpen)
 	{
-		// 打开瞬间：强制停掉可能正按住的动作，避免状态卡死（一直跑/一直开火）。
 		if (bWantsToFire)
 			StopFire();
 		if (bWantsToRun)
@@ -1000,25 +1278,22 @@ void AFPSCharacter::ToggleInventory()
 			StopAim();
 	}
 
-	OnToggleInventory(bInventoryOpen);   // 蓝图：建/拆 WBP + 切输入模式 + 显示/隐藏鼠标
+	OnToggleInventory(bInventoryOpen);
 }
 
 void AFPSCharacter::CloseInventory()
 {
-	// 仅在打开时执行。复用 ToggleInventory 的关闭路径（解锁输入 + 触发蓝图 OnToggleInventory(false)）。
 	if (!IsLocallyControlled() || !bInventoryOpen)
 		return;
 
-	ToggleInventory();   // 当前为打开 → 翻转成关闭
+	ToggleInventory();
 }
 
 void AFPSCharacter::ServerTryPickup_Implementation()
 {
-	// 服务端权威：自己查范围内最近的 Pickup（不信任客户端传来的指针 —— 它跨 RPC 常变 None）。
 	AFPSPickup* Pickup = FindBestPickupInRange();
 	if (Pickup)
 	{
-		// Pickup 自身负责"加进背包 + 销毁"，背包满则保留。
 		Pickup->ServerTryPickup(this);
 	}
 }
@@ -1029,15 +1304,248 @@ void AFPSCharacter::SetPickupTarget(AFPSPickup* Pickup)
 		return;
 
 	CurrentPickupTarget = Pickup;
-	OnPickupTargetChanged.Broadcast();   // 蓝图据此显示"按F拾取"提示
+	OnPickupTargetChanged.Broadcast();
 }
 
 void AFPSCharacter::ClearPickupTarget(AFPSPickup* Pickup)
 {
-	// 只有当前目标正是离开/销毁的那个才清 —— 避免范围内有多个 Pickup 时误清。
 	if (CurrentPickupTarget != Pickup)
 		return;
 
 	CurrentPickupTarget = nullptr;
-	OnPickupTargetChanged.Broadcast();   // 蓝图据此隐藏提示
+	OnPickupTargetChanged.Broadcast();
+}
+
+// ---------------------------------------------------------------------------
+// Action lock
+// ---------------------------------------------------------------------------
+
+bool AFPSCharacter::IsActionLocked() const
+{
+	if (bIsDead || bInputLocked || bIsUsingItem)
+		return true;
+
+	AFPSWeapon* ActiveWeapon = GetActiveWeapon();
+	if (ActiveWeapon && ActiveWeapon->IsReloading())
+		return true;
+
+	return false;
+}
+
+// ---------------------------------------------------------------------------
+// Item use state machine (server only)
+// ---------------------------------------------------------------------------
+
+void AFPSCharacter::StartItemUseProcess(const FItemUseResult& Result)
+{
+	if (!HasAuthority())
+		return;
+
+	ActiveItemUseType = Result.UseType;
+
+	if (Result.UseType == EFPSItemUseType::ChanneledHeal)
+	{
+		RemainingHealAmount = Result.ConsumedAmount;
+		ActiveHealPerTick = Result.HealPerTick;
+		ActiveHealInterval = Result.HealInterval;
+
+		const int32 TickCount = FMath::CeilToInt((float)Result.ConsumedAmount / (float)Result.HealPerTick);
+		const float TotalDuration = Result.UseTime + TickCount * Result.HealInterval;
+
+		bItemUseCompleted = false;
+		ItemUseTotalDuration = TotalDuration;
+		bIsUsingItem = true;
+
+		BeginProgress(EFPSProgressType::UseItem, TotalDuration);
+
+		GetWorldTimerManager().SetTimer(ItemUsePhaseTimerHandle, this,
+			&AFPSCharacter::OnChanneledHealWindUpComplete, Result.UseTime, false);
+	}
+	else if (Result.UseType == EFPSItemUseType::HoTApply)
+	{
+		PendingHoTBaseDuration = Result.HoTBaseDuration;
+
+		bItemUseCompleted = false;
+		ItemUseTotalDuration = Result.UseTime;
+		bIsUsingItem = true;
+
+		BeginProgress(EFPSProgressType::UseItem, Result.UseTime);
+
+		GetWorldTimerManager().SetTimer(ItemUsePhaseTimerHandle, this,
+			&AFPSCharacter::OnHoTApplicationComplete, Result.UseTime, false);
+	}
+}
+
+void AFPSCharacter::OnChanneledHealWindUpComplete()
+{
+	if (!HasAuthority() || RemainingHealAmount <= 0)
+	{
+		CompleteItemUse();
+		return;
+	}
+
+	GetWorldTimerManager().SetTimer(HealTickTimerHandle, this,
+		&AFPSCharacter::OnChanneledHealTick, ActiveHealInterval, true);
+
+	OnChanneledHealTick();
+}
+
+void AFPSCharacter::OnChanneledHealTick()
+{
+	if (!HasAuthority() || RemainingHealAmount <= 0)
+	{
+		CompleteItemUse();
+		return;
+	}
+
+	const int32 TickHeal = FMath::Min(ActiveHealPerTick, RemainingHealAmount);
+	ServerApplyHeal((float)TickHeal);
+	RemainingHealAmount -= TickHeal;
+
+	if (RemainingHealAmount <= 0)
+		CompleteItemUse();
+}
+
+void AFPSCharacter::OnHoTApplicationComplete()
+{
+	if (!HasAuthority())
+		return;
+
+	CompleteItemUse();
+	ActivateHoT(PendingHoTBaseDuration);
+}
+
+void AFPSCharacter::CompleteItemUse()
+{
+	if (!HasAuthority())
+		return;
+
+	bItemUseCompleted = true;
+	ClearItemUseState();
+	bIsUsingItem = false;
+	ItemUseTotalDuration = 0.0f;
+	EndProgress(EFPSProgressType::UseItem, true);
+}
+
+void AFPSCharacter::CancelItemUse()
+{
+	if (!HasAuthority() || !bIsUsingItem)
+		return;
+
+	bItemUseCompleted = false;
+	ClearItemUseState();
+	bIsUsingItem = false;
+	ItemUseTotalDuration = 0.0f;
+	EndProgress(EFPSProgressType::UseItem, false);
+}
+
+void AFPSCharacter::ClearItemUseState()
+{
+	if (ItemUsePhaseTimerHandle.IsValid())
+	{
+		GetWorldTimerManager().ClearTimer(ItemUsePhaseTimerHandle);
+		ItemUsePhaseTimerHandle.Invalidate();
+	}
+	if (HealTickTimerHandle.IsValid())
+	{
+		GetWorldTimerManager().ClearTimer(HealTickTimerHandle);
+		HealTickTimerHandle.Invalidate();
+	}
+
+	ActiveItemUseType = EFPSItemUseType::None;
+	RemainingHealAmount = 0;
+	ActiveHealPerTick = 0;
+	ActiveHealInterval = 0.0f;
+	PendingHoTBaseDuration = 0.0f;
+}
+
+// ---------------------------------------------------------------------------
+// OnRep - item use (client progress bar)
+// ---------------------------------------------------------------------------
+
+void AFPSCharacter::OnRep_bIsUsingItem()
+{
+	if (HasAuthority())
+		return;
+
+	if (bIsUsingItem)
+		BeginProgress(EFPSProgressType::UseItem, ItemUseTotalDuration);
+	else
+		EndProgress(EFPSProgressType::UseItem, bItemUseCompleted);
+}
+
+// ---------------------------------------------------------------------------
+// HoT buff
+// ---------------------------------------------------------------------------
+
+void AFPSCharacter::ActivateHoT(float AddedDuration)
+{
+	if (!HasAuthority())
+		return;
+
+	if (HoTState.bActive)
+	{
+		HoTRemainingTime = FMath::Min(HoTRemainingTime + AddedDuration, HoTMaxBuffDuration);
+	}
+	else
+	{
+		HoTRemainingTime = AddedDuration;
+		HoTHealPerTick = HoTHealPerSecond * HoTTickInterval;
+
+		GetWorldTimerManager().SetTimer(HoTTimerHandle, this,
+			&AFPSCharacter::OnHoTTick, HoTTickInterval, true);
+	}
+
+	HoTState.bActive = true;
+	HoTState.RemainingDuration = HoTRemainingTime;
+	HoTState.MaxDuration = HoTMaxBuffDuration;
+	HoTState.HealPerSecond = HoTHealPerSecond;
+
+	OnHoTChanged.Broadcast(true, HoTRemainingTime, HoTMaxBuffDuration);
+}
+
+void AFPSCharacter::OnHoTTick()
+{
+	if (!HasAuthority() || !HoTState.bActive)
+		return;
+
+	ServerApplyHeal(HoTHealPerTick);
+	HoTRemainingTime -= HoTTickInterval;
+
+	if (HoTRemainingTime <= 0.0f)
+	{
+		DeactivateHoT();
+	}
+}
+
+void AFPSCharacter::DeactivateHoT()
+{
+	if (!HasAuthority())
+		return;
+
+	if (HoTTimerHandle.IsValid())
+	{
+		GetWorldTimerManager().ClearTimer(HoTTimerHandle);
+		HoTTimerHandle.Invalidate();
+	}
+
+	HoTRemainingTime = 0.0f;
+	HoTHealPerTick = 0.0f;
+
+	HoTState.bActive = false;
+	HoTState.RemainingDuration = 0.0f;
+
+	OnHoTChanged.Broadcast(false, 0.0f, 0.0f);
+}
+
+// ---------------------------------------------------------------------------
+// OnRep - HoT buff (client UI)
+// ---------------------------------------------------------------------------
+
+void AFPSCharacter::OnRep_HoTState()
+{
+	if (HasAuthority())
+		return;
+
+	OnHoTChanged.Broadcast(HoTState.bActive, HoTState.RemainingDuration, HoTState.MaxDuration);
 }

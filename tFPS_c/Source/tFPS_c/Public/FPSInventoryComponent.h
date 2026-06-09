@@ -6,6 +6,32 @@
 #include "FPSInventoryComponent.generated.h"
 
 class AFPSCharacter;
+class UFPSAmmoItemDef;
+
+/**
+ * 道具使用的返回信息。背包组件扣完耐久/数量后，把异步配置打包传回给 Character 驱动状态机。
+ * 即时类（Instant）道具用不到这些字段，调用方忽略即可。
+ */
+USTRUCT(BlueprintType)
+struct FItemUseResult
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	EFPSItemUseType UseType = EFPSItemUseType::None;
+
+	/** 本次消耗的耐久/数量（Type 1=实际回血, Type 2=承诺回血量, Type 3=1） */
+	UPROPERTY()
+	int32 ConsumedAmount = 0;
+
+	// ---- Type 2 (ChanneledHeal) 配置 ----
+	float UseTime = 0.0f;
+	int32 HealPerTick = 0;
+	float HealInterval = 0.0f;
+
+	// ---- Type 3 (HoTApply) 配置 ----
+	float HoTBaseDuration = 0.0f;
+};
 
 /** 背包内容变化事件（每端本机，OnRep 驱动）。UI 订阅此事件刷新背包面板。 */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnInventoryChanged);
@@ -50,7 +76,15 @@ public:
 	 */
 	bool ServerAddEntry(const FInventoryEntry& Entry);
 
-	/** 服务端：使用第 Index 格的道具（由 Character/Controller 的 RPC 转发过来）。 */
+	/**
+	 * 服务端：开始使用第 Index 格的道具。
+	 * 对即时类道具（Instant）同步完成全部效果；对异步类道具（ChanneledHeal/HoTApply）
+	 * 只扣耐久/数量，把异步配置打包进 FItemUseResult 返回给调用方驱动状态机。
+	 * @return 使用结果。UseType==None 表示无法使用（条件不满足或已耗尽）。
+	 */
+	FItemUseResult BeginItemUse(int32 Index);
+
+	/** 服务端：使用第 Index 格的道具（即时类道具同步路径，保留兼容）。 */
 	void ServerUseItem(int32 Index);
 
 	/**
@@ -61,6 +95,21 @@ public:
 
 	/** 服务端：清空背包（角色复活时可调用，当前 MVP 暂不强制清，保留接口）。 */
 	void ServerClear();
+
+	/**
+	 * 服务端：从背包消耗指定口径的子弹（换弹时 Weapon 调用）。
+	 * 遍历背包中所有匹配 Caliber 的 UFPSAmmoItemDef 条目，按条目顺序逐格取弹。
+	 * @param Caliber 需要的口径
+	 * @param Amount 需要的发数
+	 * @param OutLastDef 输出最后取弹的弹药类型（无匹配时为 nullptr）
+	 * @param OutBreakdown 可选：输出每次取弹的（AmmoDef, Count）明细，供调用方按弹药链顺序记录
+	 * @return 实际取到的发数（<= Amount）
+	 */
+	int32 ConsumeAmmo(FName Caliber, int32 Amount, UFPSAmmoItemDef*& OutLastDef,
+		TArray<struct FWeaponAmmoEntry>* OutBreakdown = nullptr);
+
+	/** 手动触发背包复制刷新（Listen Server host 不走复制，武器换弹后需调此刷新 UI）。 */
+	void MarkItemsDirty();
 
 	// ---- 蓝图/UI 读取 ----
 

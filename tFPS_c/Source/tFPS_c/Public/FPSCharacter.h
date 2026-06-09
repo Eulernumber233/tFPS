@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
 #include "InputActionValue.h"
+#include "FPSItemDef.h"
 #include "FPSCharacter.generated.h"
 
 class AFPSWeapon;
@@ -43,6 +44,28 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnStaminaChanged, float, Stamina, 
 /** 命中特效事件载荷：服务端权威命中信息（命中点/法线为占位，伤害为权威值，Victim 命中环境时为空） */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnHitEvent,
 	FVector, ImpactPoint, FVector, ImpactNormal, float, Damage, AFPSCharacter*, Victim);
+
+/** HoT 持续回血 buff 状态（复制给本人，驱动 buff UI 的独立进度条）。 */
+USTRUCT(BlueprintType)
+struct FHoTState
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly)
+	bool bActive = false;
+
+	UPROPERTY(BlueprintReadOnly)
+	float RemainingDuration = 0.0f;
+
+	UPROPERTY(BlueprintReadOnly)
+	float MaxDuration = 0.0f;
+
+	UPROPERTY(BlueprintReadOnly)
+	float HealPerSecond = 0.0f;
+};
+
+/** HoT buff 状态变化 —— HUD 订阅显示/更新/隐藏 buff 独立进度条。 */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnHoTChanged, bool, bActive, float, RemainingDuration, float, MaxDuration);
 
 UENUM(BlueprintType)
 enum class EFPSMovementState : uint8
@@ -125,6 +148,37 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapon")
 	AFPSWeapon* GetWeapon() const { return CurrentWeapon; }
 
+	/** 当前活跃武器（0=主武器，1=副武器）。蓝图层读取用于开火/换弹等操作。 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon")
+	AFPSWeapon* GetActiveWeapon() const;
+
+	/** 副武器（第二把枪）。服务端权威，复制到所有端。 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon")
+	AFPSWeapon* GetSecondaryWeapon() const { return SecondaryWeapon; }
+
+	/** 当前活跃武器槽位（0=主武器，1=副武器）。 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon")
+	int32 GetActiveWeaponSlot() const { return ActiveWeaponSlot; }
+
+	/** 获取指定槽位的武器（0或1）。越界返回 nullptr。 */
+	AFPSWeapon* GetWeaponInSlot(int32 Slot) const;
+
+	// ---- 武器拾取系统 ----
+
+	/** 设置当前可拾取武器目标（武器 Pickup 进入范围时调用，纯本地）。 */
+	void SetWeaponPickupTarget(AFPSWeapon* Weapon);
+
+	/** 清除可拾取武器目标。仅当 Pickup 是当前目标才清。 */
+	void ClearWeaponPickupTarget(AFPSWeapon* Weapon);
+
+	/** 当前可拾取武器目标（蓝图读取，非空表示可显示"按 F 换枪"提示）。 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon")
+	AFPSWeapon* GetWeaponPickupTarget() const { return CurrentWeaponPickupTarget; }
+
+	/** 可拾取武器目标变化事件（进入/离开范围）——蓝图绑定显示/隐藏换枪提示 UI。 */
+	UPROPERTY(BlueprintAssignable, Category = "Weapon")
+	FOnActionEvent OnWeaponPickupTargetChanged;
+
 	// ---- 背包 / 道具系统 ----
 
 	/** 背包组件（所有端可读，蓝图 UI 用它遍历格子 / 订阅 OnInventoryChanged）。 */
@@ -191,6 +245,21 @@ public:
 	 */
 	void ForceStopFireAndAim();
 
+	/**
+	 * 角色是否处于"动作锁定"状态（死亡/背包打开/使用道具中/换弹中）。
+	 * 锁定时禁用开火/瞄准/奔跑/换弹/拾取，但不影响 WASD 移动和鼠标视角。
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Input")
+	bool IsActionLocked() const;
+
+	/** 是否正在使用道具（引导治疗/HoT 使用中）。蓝图可读，用于动画/输入判断。 */
+	UFUNCTION(BlueprintCallable, Category = "Inventory")
+	bool IsUsingItem() const { return bIsUsingItem; }
+
+	/** HoT buff 当前状态（复制给本人，UI 读此画 buff 进度条）。 */
+	UFUNCTION(BlueprintCallable, Category = "Buff")
+	const FHoTState& GetHoTState() const { return HoTState; }
+
 	/** 当前移动状态 — 蓝图层读取用于动画/视觉 */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Movement")
 	EFPSMovementState MovementState = EFPSMovementState::Idle;
@@ -213,6 +282,24 @@ public:
 	/** 武器就绪（服务端生成后 / 客户端收到复制后）— 蓝图实现挂载到手臂骨骼 */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon")
 	void OnWeaponEquipped();
+
+	/** 副武器就绪 — 蓝图实现挂载到手臂骨骼（同 OnWeaponEquipped，但拿 GetSecondaryWeapon()）。 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon")
+	void OnSecondaryWeaponEquipped();
+
+	/**
+	 * 服务端：将武器安装到指定槽位（0=主，1=副）。
+	 * 如果槽位已有武器，旧武器会被替换（但不掉落——调用方负责先处理旧武器）。
+	 * 新武器设为活跃武器，旧活跃武器隐藏。
+	 */
+	void EquipWeapon(AFPSWeapon* Weapon, int32 Slot);
+
+	/**
+	 * 切换活跃武器槽（本地调用 → 服务端权威切换）。
+	 * 如果目标槽位无武器则忽略。
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon")
+	void SwitchWeapon(int32 NewSlot);
 
 	// ---- 持续动作进度条接口（每端本地广播，纯表现）----
 	// 换弹/用药等"需要一段时间完成"的动作统一走这两个委托，HUD 只维护一个进度条。
@@ -318,6 +405,10 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Stamina")
 	FOnStaminaChanged OnStaminaChanged;
 
+	/** HoT buff 状态变化 —— HUD 订阅显示/更新/隐藏 buff 独立进度条。 */
+	UPROPERTY(BlueprintAssignable, Category = "Buff")
+	FOnHoTChanged OnHoTChanged;
+
 	/** 武器在每端收到 MulticastHitConfirmed 后调用攻击者角色的此函数，本地判断角色身份后分发三种事件。
 	 *  纯本地表现，不做任何权威逻辑。Victim 为命中的角色（命中环境时为 nullptr）。 */
 	void DispatchHitFX(const FVector& ImpactPoint, const FVector& ImpactNormal,
@@ -346,6 +437,20 @@ protected:
 	UPROPERTY(ReplicatedUsing = OnRep_CurrentWeapon, BlueprintReadOnly, Category = "Weapon")
 	TObjectPtr<AFPSWeapon> CurrentWeapon;
 
+	/** Called on clients when secondary weapon replicates */
+	UFUNCTION()
+	void OnRep_SecondaryWeapon(AFPSWeapon* OldWeapon);
+
+	UPROPERTY(ReplicatedUsing = OnRep_SecondaryWeapon, BlueprintReadOnly, Category = "Weapon")
+	TObjectPtr<AFPSWeapon> SecondaryWeapon;
+
+	/** 当前活跃武器槽位（0=主武器，1=副武器）。服务端权威，复制到所有端。 */
+	UPROPERTY(ReplicatedUsing = OnRep_ActiveWeaponSlot)
+	int32 ActiveWeaponSlot = 0;
+
+	UFUNCTION()
+	void OnRep_ActiveWeaponSlot();
+
 	/** Weapon subclass to spawn at BeginPlay */
 	UPROPERTY(EditDefaultsOnly, Category = "Weapon")
 	TSubclassOf<AFPSWeapon> WeaponClass;
@@ -353,6 +458,14 @@ protected:
 	// 最大血量：仅蓝图默认值可编辑
 	UPROPERTY(EditDefaultsOnly, Category = "Health")
 	float MaxHealth = 100.0f;
+
+	/** HoT 持续回血 buff：每秒回血量。蓝图可调（不同角色可能有不同体质）。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health")
+	float HoTHealPerSecond = 5.0f;
+
+	/** HoT 持续回血 buff：叠加时间上限（秒）。蓝图可调。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health")
+	float HoTMaxBuffDuration = 30.0f;
 
 	/** 死亡后到复活的延迟（秒）。死亡相机/动画在这段时间播放。蓝图可调。 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Health")
@@ -364,6 +477,31 @@ protected:
 
 	UPROPERTY(ReplicatedUsing = OnRep_bIsDead, BlueprintReadOnly, Category = "Health")
 	uint8 bIsDead : 1;
+
+	// ---- 道具使用状态（COND_OwnerOnly 复制给本人，驱动进度条） ----
+
+	/** 是否正在使用道具（引导治疗/HoT 使用中）。复制给本人驱动进度条 + 锁动作。 */
+	UPROPERTY(ReplicatedUsing = OnRep_bIsUsingItem)
+	uint8 bIsUsingItem : 1;
+
+	/** 当前道具使用的总时长（秒），复制给本人——客户端 OnRep 靠它起本地进度插值。 */
+	UPROPERTY(Replicated)
+	float ItemUseTotalDuration = 0.0f;
+
+	/** 最近一次道具使用是否正常完成（vs 被打断/取消）。复制给本人驱动 EndProgress bCompleted。 */
+	UPROPERTY(Replicated)
+	uint8 bItemUseCompleted : 1;
+
+	UFUNCTION()
+	void OnRep_bIsUsingItem();
+
+	// ---- HoT 持续回血 buff（COND_OwnerOnly 复制给本人，驱动 buff UI） ----
+
+	UPROPERTY(ReplicatedUsing = OnRep_HoTState)
+	FHoTState HoTState;
+
+	UFUNCTION()
+	void OnRep_HoTState();
 
 	// ---- 体力配置（蓝图可编辑，每个实例可不同） ----
 
@@ -475,6 +613,14 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
 	UInputAction* InputInventory = nullptr;
 
+	/** 1 键：切换主武器 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
+	UInputAction* InputSwitchWeapon1 = nullptr;
+
+	/** 2 键：切换副武器 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
+	UInputAction* InputSwitchWeapon2 = nullptr;
+
 	// ---- 背包系统 ----
 
 	/** 背包组件（构造时创建，服务端权威，复制给本人）。 */
@@ -484,6 +630,10 @@ protected:
 	/** 当前范围内可拾取的 Pickup（本地状态，不复制；overlap 在每端各自维护）。 */
 	UPROPERTY()
 	TObjectPtr<AFPSPickup> CurrentPickupTarget = nullptr;
+
+	/** 当前范围内可拾取的武器 Pickup（本地状态，不复制）。 */
+	UPROPERTY()
+	TObjectPtr<AFPSWeapon> CurrentWeaponPickupTarget = nullptr;
 
 	/** 背包面板是否打开（本地状态，不复制）。 */
 	bool bInventoryOpen = false;
@@ -583,7 +733,87 @@ protected:
 	UFUNCTION(Server, Reliable)
 	void ServerReload();
 
+	/** 客户端请求取消当前道具使用（按 F 或其它取消操作）→ 服务端执行取消。 */
+	UFUNCTION(Server, Reliable)
+	void ServerCancelUseItem();
+
 	/** 客户端每帧将本地瞄准 Pitch 发送到服务端，服务端赋值后复制给所有客户端 */
 	UFUNCTION(Server, Reliable)
 	void ServerUpdateAimPitch(float Pitch);
+
+	// ---- 武器切换 & 拾取 ----
+
+	/** 切换主武器（按 1 键） */
+	void SwitchToPrimaryWeapon();
+
+	/** 切换副武器（按 2 键） */
+	void SwitchToSecondaryWeapon();
+
+	/** 服务端切换武器槽位 */
+	UFUNCTION(Server, Reliable)
+	void ServerSwitchWeapon(int32 NewSlot);
+
+	/** 客户端请求拾取武器 Pickup → 服务端权威执行（交换/装备/丢弃）。 */
+	UFUNCTION(Server, Reliable)
+	void ServerTryPickupWeapon();
+
+	/** 服务端：查角色周围最近的武器 Pickup。 */
+	AFPSWeapon* FindBestWeaponPickupInRange() const;
+
+	/** 服务端：将指定武器作为 Pickup 掉落在角色脚下（死亡/交换时调用）。 */
+	void DropWeaponAsPickup(AFPSWeapon* Weapon);
+
+	// ---- 道具使用状态机（仅服务端，不复制） ----
+
+	/** 取消当前道具使用（F 键 / 死亡时调用）。已扣耐久不退还。 */
+	void CancelItemUse();
+
+	/** 启动异步道具使用流程（Character 状态机入口），由 ServerUseInventoryItem_Implementation 调用。 */
+	void StartItemUseProcess(const struct FItemUseResult& Result);
+
+	/** ChanneledHeal：前摇结束 → 开始逐跳回血 */
+	void OnChanneledHealWindUpComplete();
+
+	/** ChanneledHeal：单跳回血 */
+	void OnChanneledHealTick();
+
+	/** HoTApply：使用时间结束 → 激活 HoT buff */
+	void OnHoTApplicationComplete();
+
+	/** 道具使用正常完成（所有跳血交付完毕 / HoT buff 已激活） */
+	void CompleteItemUse();
+
+	/** 清空所有道具使用相关的 timer 和临时状态 */
+	void ClearItemUseState();
+
+	// ---- HoT Buff 系统（仅服务端，最终状态复制到 HoTState） ----
+
+	/** 激活/叠加 HoT 持续回血 buff。每秒回血速度和上限取自 Character 自身配置。 */
+	void ActivateHoT(float AddedDuration);
+
+	/** HoT 每 tick 回血 */
+	void OnHoTTick();
+
+	/** 移除 HoT buff（到期/死亡） */
+	void DeactivateHoT();
+
+	// ---- 道具使用内部状态（仅服务端） ----
+
+	EFPSItemUseType ActiveItemUseType = EFPSItemUseType::None;
+	int32 RemainingHealAmount = 0;
+	int32 ActiveHealPerTick = 0;
+	float ActiveHealInterval = 0.0f;
+
+	FTimerHandle ItemUsePhaseTimerHandle;
+	FTimerHandle HealTickTimerHandle;
+
+	// ---- HoT buff 内部状态（仅服务端） ----
+
+	float HoTRemainingTime = 0.0f;
+	float HoTHealPerTick = 0.0f;
+	FTimerHandle HoTTimerHandle;
+	static constexpr float HoTTickInterval = 1.0f;
+
+	// HoT 待激活参数（UseTime 期间暂存）
+	float PendingHoTBaseDuration = 0.0f;
 };
