@@ -187,6 +187,17 @@ void UFPSInventoryComponent::ServerDropItem(int32 Index)
 	OnRep_Items();   // 服务端本机手动刷
 }
 
+void UFPSInventoryComponent::ServerRemoveItemAt(int32 Index)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+		return;
+	if (!Items.IsValidIndex(Index))
+		return;
+
+	Items.RemoveAt(Index);
+	OnRep_Items();
+}
+
 void UFPSInventoryComponent::ServerClear()
 {
 	if (!GetOwner() || !GetOwner()->HasAuthority())

@@ -93,6 +93,12 @@ public:
 	 */
 	void ServerDropItem(int32 Index);
 
+	/**
+	 * 服务端：移除第 Index 格道具（不生成掉落 Pickup，用于提交/消耗等不落地场景）。
+	 * 静默删除——不广播 OnPickupBlocked、不生成任何 Actor。
+	 */
+	void ServerRemoveItemAt(int32 Index);
+
 	/** 服务端：清空背包（角色复活时可调用，当前 MVP 暂不强制清，保留接口）。 */
 	void ServerClear();
 

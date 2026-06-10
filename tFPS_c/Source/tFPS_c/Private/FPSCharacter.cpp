@@ -3,8 +3,10 @@
 #include "FPSGameMode.h"
 #include "FPSPlayerState.h"
 #include "FPSInventoryComponent.h"
+#include "FPSInteractionComponent.h"
 #include "FPSItemDef.h"
 #include "FPSPickup.h"
+#include "FPSSubmissionPoint.h"
 #include "FPSPlayerController.h"
 #include "Net/UnrealNetwork.h"
 #include "GameFramework/CharacterMovementComponent.h"
@@ -14,8 +16,6 @@
 #include "EnhancedInputSubsystems.h"
 #include "InputMappingContext.h"
 #include "Engine/World.h"
-#include "Engine/OverlapResult.h"
-#include "CollisionQueryParams.h"
 
 #define COLLISION_WEAPON ECC_GameTraceChannel1
 
@@ -46,6 +46,8 @@ AFPSCharacter::AFPSCharacter()
 	}
 
 	Inventory = CreateDefaultSubobject<UFPSInventoryComponent>(TEXT("Inventory"));
+
+	InteractionManager = CreateDefaultSubobject<UFPSInteractionComponent>(TEXT("InteractionManager"));
 }
 
 AFPSWeapon* AFPSCharacter::GetWeaponInSlot(int32 Slot) const
@@ -500,6 +502,11 @@ void AFPSCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompon
 	{
 		EIC->BindAction(InputSwitchWeapon2, ETriggerEvent::Started, this, &AFPSCharacter::SwitchToSecondaryWeapon);
 	}
+
+	if (InputCycleInteraction)
+	{
+		EIC->BindAction(InputCycleInteraction, ETriggerEvent::Triggered, this, &AFPSCharacter::CycleInteractionInput);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -825,6 +832,15 @@ void AFPSCharacter::SetWeaponPickupTarget(AFPSWeapon* Weapon)
 		return;
 
 	CurrentWeaponPickupTarget = Weapon;
+
+	if (InteractionManager && Weapon)
+	{
+		InteractionManager->RegisterInteraction(Weapon,
+			EFPSInteractionType::WeaponPickup,
+			FText::FromString(TEXT("Swap weapon")),
+			100);
+	}
+
 	OnWeaponPickupTargetChanged.Broadcast();
 }
 
@@ -833,46 +849,11 @@ void AFPSCharacter::ClearWeaponPickupTarget(AFPSWeapon* Weapon)
 	if (CurrentWeaponPickupTarget != Weapon)
 		return;
 
+	if (InteractionManager && CurrentWeaponPickupTarget)
+		InteractionManager->UnregisterInteraction(CurrentWeaponPickupTarget);
+
 	CurrentWeaponPickupTarget = nullptr;
 	OnWeaponPickupTargetChanged.Broadcast();
-}
-
-AFPSWeapon* AFPSCharacter::FindBestWeaponPickupInRange() const
-{
-	UWorld* World = GetWorld();
-	if (!World)
-		return nullptr;
-
-	const FVector Origin = GetActorLocation();
-	const float QueryRadius = 300.0f;
-
-	TArray<FOverlapResult> Overlaps;
-	FCollisionQueryParams Params(SCENE_QUERY_STAT(FindWeaponPickup), false, this);
-	World->OverlapMultiByObjectType(
-		Overlaps,
-		Origin,
-		FQuat::Identity,
-		FCollisionObjectQueryParams(ECC_WorldDynamic),
-		FCollisionShape::MakeSphere(QueryRadius),
-		Params);
-
-	AFPSWeapon* Best = nullptr;
-	float BestDistSq = TNumericLimits<float>::Max();
-	for (const FOverlapResult& O : Overlaps)
-	{
-		AFPSWeapon* Weapon = Cast<AFPSWeapon>(O.GetActor());
-		if (!Weapon || !Weapon->IsOnGround())
-			continue;
-
-		const float DistSq = FVector::DistSquared(Origin, Weapon->GetActorLocation());
-		const float R = Weapon->GetPickupRadius();
-		if (DistSq <= R * R && DistSq < BestDistSq)
-		{
-			Best = Weapon;
-			BestDistSq = DistSq;
-		}
-	}
-	return Best;
 }
 
 void AFPSCharacter::ServerTryPickupWeapon_Implementation()
@@ -880,9 +861,15 @@ void AFPSCharacter::ServerTryPickupWeapon_Implementation()
 	if (!HasAuthority())
 		return;
 
-	AFPSWeapon* Weapon = FindBestWeaponPickupInRange();
-	if (!Weapon)
+	// 服务端也用 CurrentWeaponPickupTarget（由武器 overlap 在服务端设置），加距离校验。
+	if (!CurrentWeaponPickupTarget || !CurrentWeaponPickupTarget->IsOnGround())
 		return;
+
+	const float Dist = FVector::Dist(GetActorLocation(), CurrentWeaponPickupTarget->GetActorLocation());
+	if (Dist > CurrentWeaponPickupTarget->GetPickupRadius() + 50.0f)
+		return;
+
+	AFPSWeapon* Weapon = CurrentWeaponPickupTarget;
 
 	// 0 guns: equip as primary.
 	if (!CurrentWeapon && !SecondaryWeapon)
@@ -1129,7 +1116,24 @@ void AFPSCharacter::Interact()
 	if (IsActionLocked())
 		return;
 
-	// Weapon pickup has priority over item pickup.
+	// 交互管理器优先：按选中的交互条目路由行为。
+	if (InteractionManager && InteractionManager->GetEntryCount() > 0)
+	{
+		switch (InteractionManager->GetActiveType())
+		{
+		case EFPSInteractionType::SubmissionPoint:
+			ServerSubmitAllValuables();
+			return;
+		case EFPSInteractionType::WeaponPickup:
+			ServerTryPickupWeapon();
+			return;
+		case EFPSInteractionType::Pickup:
+			ServerTryPickup();
+			return;
+		}
+	}
+
+	// 兜底（交互管理器无条目时走旧逻辑）。
 	if (CurrentWeaponPickupTarget)
 	{
 		ServerTryPickupWeapon();
@@ -1140,6 +1144,100 @@ void AFPSCharacter::Interact()
 		return;
 
 	ServerTryPickup();
+}
+
+// ---------------------------------------------------------------------------
+// Interaction manager (scroll wheel + prompt list)
+// ---------------------------------------------------------------------------
+
+void AFPSCharacter::CycleInteractionNext()
+{
+	if (InteractionManager)
+		InteractionManager->CycleNext();
+}
+
+void AFPSCharacter::CycleInteractionPrev()
+{
+	if (InteractionManager)
+		InteractionManager->CyclePrev();
+}
+
+void AFPSCharacter::CycleInteractionInput(const FInputActionValue& Value)
+{
+	const float Axis = Value.Get<float>();
+	if (Axis > 0.1f)
+		CycleInteractionNext();
+	else if (Axis < -0.1f)
+		CycleInteractionPrev();
+}
+
+// ---------------------------------------------------------------------------
+// Submission system
+// ---------------------------------------------------------------------------
+
+void AFPSCharacter::SetSubmissionTarget(AFPSSubmissionPoint* Point)
+{
+	if (CurrentSubmissionTarget == Point)
+		return;
+
+	CurrentSubmissionTarget = Point;
+
+	if (InteractionManager && Point)
+	{
+		InteractionManager->RegisterInteraction(Point,
+			EFPSInteractionType::SubmissionPoint,
+			FText::FromString(TEXT("Submit valuables")),
+			50);
+	}
+	else if (InteractionManager)
+	{
+		InteractionManager->UnregisterInteraction(Point);
+	}
+
+	OnSubmissionTargetChanged.Broadcast();
+}
+
+void AFPSCharacter::ClearSubmissionTarget(AFPSSubmissionPoint* Point)
+{
+	if (CurrentSubmissionTarget != Point)
+		return;
+
+	if (InteractionManager && CurrentSubmissionTarget)
+		InteractionManager->UnregisterInteraction(CurrentSubmissionTarget);
+
+	CurrentSubmissionTarget = nullptr;
+	OnSubmissionTargetChanged.Broadcast();
+}
+
+bool AFPSCharacter::CanSubmitItems() const
+{
+	return CurrentSubmissionTarget && CurrentSubmissionTarget->IsOpen();
+}
+
+void AFPSCharacter::SubmitInventoryItem(int32 Index)
+{
+	if (!CanSubmitItems())
+		return;
+
+	ServerSubmitSingleItem(Index);
+}
+
+void AFPSCharacter::ServerSubmitAllValuables_Implementation()
+{
+	if (!HasAuthority())
+		return;
+
+	if (CurrentSubmissionTarget && CurrentSubmissionTarget->IsOpen())
+		CurrentSubmissionTarget->SubmitAllValuables(this);
+}
+
+void AFPSCharacter::ServerSubmitSingleItem_Implementation(int32 Index)
+{
+	if (!HasAuthority())
+		return;
+
+	if (CurrentSubmissionTarget && CurrentSubmissionTarget->IsOpen())
+		CurrentSubmissionTarget->SubmitSingleItem(this, Index);
 }
 
 // ---------------------------------------------------------------------------
@@ -1198,44 +1296,6 @@ void AFPSCharacter::ServerDropInventoryItem_Implementation(int32 Index)
 		Inventory->ServerDropItem(Index);
 }
 
-AFPSPickup* AFPSCharacter::FindBestPickupInRange() const
-{
-	UWorld* World = GetWorld();
-	if (!World)
-		return nullptr;
-
-	const FVector Origin = GetActorLocation();
-	const float QueryRadius = 300.0f;
-
-	TArray<FOverlapResult> Overlaps;
-	FCollisionQueryParams Params(SCENE_QUERY_STAT(FindPickup), false, this);
-	World->OverlapMultiByObjectType(
-		Overlaps,
-		Origin,
-		FQuat::Identity,
-		FCollisionObjectQueryParams(ECC_WorldDynamic),
-		FCollisionShape::MakeSphere(QueryRadius),
-		Params);
-
-	AFPSPickup* Best = nullptr;
-	float BestDistSq = TNumericLimits<float>::Max();
-	for (const FOverlapResult& O : Overlaps)
-	{
-		AFPSPickup* Pickup = Cast<AFPSPickup>(O.GetActor());
-		if (!Pickup)
-			continue;
-
-		const float DistSq = FVector::DistSquared(Origin, Pickup->GetActorLocation());
-		const float R = Pickup->GetPickupRadius();
-		if (DistSq <= R * R && DistSq < BestDistSq)
-		{
-			Best = Pickup;
-			BestDistSq = DistSq;
-		}
-	}
-	return Best;
-}
-
 void AFPSCharacter::ForceStopFireAndAim()
 {
 	if (!IsLocallyControlled())
@@ -1291,11 +1351,17 @@ void AFPSCharacter::CloseInventory()
 
 void AFPSCharacter::ServerTryPickup_Implementation()
 {
-	AFPSPickup* Pickup = FindBestPickupInRange();
-	if (Pickup)
-	{
-		Pickup->ServerTryPickup(this);
-	}
+	if (!HasAuthority())
+		return;
+
+	if (!CurrentPickupTarget)
+		return;
+
+	const float Dist = FVector::Dist(GetActorLocation(), CurrentPickupTarget->GetActorLocation());
+	if (Dist > CurrentPickupTarget->GetPickupRadius() + 50.0f)
+		return;
+
+	CurrentPickupTarget->ServerTryPickup(this);
 }
 
 void AFPSCharacter::SetPickupTarget(AFPSPickup* Pickup)
@@ -1304,6 +1370,16 @@ void AFPSCharacter::SetPickupTarget(AFPSPickup* Pickup)
 		return;
 
 	CurrentPickupTarget = Pickup;
+
+	if (InteractionManager && Pickup && Pickup->GetItemDef())
+	{
+		const FText Prompt = FText::Format(
+			FText::FromString(TEXT("Pick up {0}")),
+			Pickup->GetItemDef()->DisplayName);
+		InteractionManager->RegisterInteraction(Pickup,
+			EFPSInteractionType::Pickup, Prompt, 0);
+	}
+
 	OnPickupTargetChanged.Broadcast();
 }
 
@@ -1311,6 +1387,9 @@ void AFPSCharacter::ClearPickupTarget(AFPSPickup* Pickup)
 {
 	if (CurrentPickupTarget != Pickup)
 		return;
+
+	if (InteractionManager && CurrentPickupTarget)
+		InteractionManager->UnregisterInteraction(CurrentPickupTarget);
 
 	CurrentPickupTarget = nullptr;
 	OnPickupTargetChanged.Broadcast();

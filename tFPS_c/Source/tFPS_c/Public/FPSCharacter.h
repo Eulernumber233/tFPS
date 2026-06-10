@@ -9,7 +9,9 @@
 class AFPSWeapon;
 class AFPSPlayerController;
 class AFPSPickup;
+class AFPSSubmissionPoint;
 class UFPSInventoryComponent;
+class UFPSInteractionComponent;
 class UInputMappingContext;
 class UInputAction;
 
@@ -218,6 +220,47 @@ public:
 	/** 可拾取目标变化事件（进入/离开范围）—— 蓝图绑定显示/隐藏拾取提示 UI。 */
 	UPROPERTY(BlueprintAssignable, Category = "Inventory")
 	FOnActionEvent OnPickupTargetChanged;
+
+	// ---- 交互管理系统 ----
+
+	/** 交互管理器（管理所有 F 键交互目标的列表 + 滚轮切换）。 */
+	UFUNCTION(BlueprintCallable, Category = "Interaction")
+	UFPSInteractionComponent* GetInteractionManager() const { return InteractionManager; }
+
+	/** 切换到下一个交互目标（滚轮下滚调用）。 */
+	UFUNCTION(BlueprintCallable, Category = "Interaction")
+	void CycleInteractionNext();
+
+	/** 切换到上一个交互目标（滚轮上滚调用）。 */
+	UFUNCTION(BlueprintCallable, Category = "Interaction")
+	void CycleInteractionPrev();
+
+	// ---- 物品提交系统 ----
+
+	/** 设置当前范围内提交点（进入范围 / 提交点开放时调用，纯本地）。 */
+	void SetSubmissionTarget(AFPSSubmissionPoint* Point);
+
+	/** 清除当前提交点（离开范围 / 提交点关闭时调用）。 */
+	void ClearSubmissionTarget(AFPSSubmissionPoint* Point);
+
+	/** 当前可提交目标（蓝图读取，非空且开放时显示提交 UI）。 */
+	UFUNCTION(BlueprintCallable, Category = "Submission")
+	AFPSSubmissionPoint* GetSubmissionTarget() const { return CurrentSubmissionTarget; }
+
+	/** 是否可以在当前提交点提交物品（附近有开放提交点 + 背包有贵重品）。 */
+	UFUNCTION(BlueprintCallable, Category = "Submission")
+	bool CanSubmitItems() const;
+
+	/**
+	 * 单独提交背包第 Index 格的道具（右键菜单"提交"调用 → 转发服务端）。
+	 * 需先通过 CanSubmitItems() 判可提交。
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Submission")
+	void SubmitInventoryItem(int32 Index);
+
+	/** 提交目标变化事件 —— 蓝图绑定显示/隐藏提交提示 UI。 */
+	UPROPERTY(BlueprintAssignable, Category = "Submission")
+	FOnActionEvent OnSubmissionTargetChanged;
 
 	/**
 	 * 切换背包面板（按 E，本地表现）。C++ 只负责绑 E 键并转发到这里，
@@ -621,11 +664,19 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
 	UInputAction* InputSwitchWeapon2 = nullptr;
 
+	/** 鼠标滚轮：切换 F 键交互目标（Axis1D，滚上=+1, 滚下=-1）。 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
+	UInputAction* InputCycleInteraction = nullptr;
+
 	// ---- 背包系统 ----
 
 	/** 背包组件（构造时创建，服务端权威，复制给本人）。 */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Inventory")
 	TObjectPtr<UFPSInventoryComponent> Inventory;
+
+	/** 交互管理器（构造时创建，不复制——每端本地管理自己的交互目标列表）。 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Interaction")
+	TObjectPtr<UFPSInteractionComponent> InteractionManager;
 
 	/** 当前范围内可拾取的 Pickup（本地状态，不复制；overlap 在每端各自维护）。 */
 	UPROPERTY()
@@ -634,6 +685,10 @@ protected:
 	/** 当前范围内可拾取的武器 Pickup（本地状态，不复制）。 */
 	UPROPERTY()
 	TObjectPtr<AFPSWeapon> CurrentWeaponPickupTarget = nullptr;
+
+	/** 当前范围内开放的提交点（本地状态，不复制）。 */
+	UPROPERTY()
+	TObjectPtr<AFPSSubmissionPoint> CurrentSubmissionTarget = nullptr;
 
 	/** 背包面板是否打开（本地状态，不复制）。 */
 	bool bInventoryOpen = false;
@@ -663,9 +718,6 @@ protected:
 	 */
 	UFUNCTION(Server, Reliable)
 	void ServerTryPickup();
-
-	/** 服务端：查角色周围最近的可拾取 Pickup（球形重叠 + 范围校验）。 */
-	AFPSPickup* FindBestPickupInRange() const;
 
 	/** 客户端请求使用背包道具 → 服务端权威执行。 */
 	UFUNCTION(Server, Reliable)
@@ -757,8 +809,16 @@ protected:
 	UFUNCTION(Server, Reliable)
 	void ServerTryPickupWeapon();
 
-	/** 服务端：查角色周围最近的武器 Pickup。 */
-	AFPSWeapon* FindBestWeaponPickupInRange() const;
+	/** 客户端请求一键提交所有贵重品 → 服务端找最近开放提交点执行。 */
+	UFUNCTION(Server, Reliable)
+	void ServerSubmitAllValuables();
+
+	/** 客户端请求单独提交第 Index 格 → 服务端找最近开放提交点执行。 */
+	UFUNCTION(Server, Reliable)
+	void ServerSubmitSingleItem(int32 Index);
+
+	/** 滚轮输入处理：正值=下一项，负值=上一项。 */
+	void CycleInteractionInput(const FInputActionValue& Value);
 
 	/** 服务端：将指定武器作为 Pickup 掉落在角色脚下（死亡/交换时调用）。 */
 	void DropWeaponAsPickup(AFPSWeapon* Weapon);
