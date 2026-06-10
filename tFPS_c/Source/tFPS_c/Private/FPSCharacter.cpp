@@ -52,12 +52,12 @@ AFPSCharacter::AFPSCharacter()
 
 AFPSWeapon* AFPSCharacter::GetWeaponInSlot(int32 Slot) const
 {
-	return Slot == 0 ? CurrentWeapon : (Slot == 1 ? SecondaryWeapon : nullptr);
+	return Slot == 0 ? PrimaryWeapon : (Slot == 1 ? SecondaryWeapon : nullptr);
 }
 
 AFPSWeapon* AFPSCharacter::GetActiveWeapon() const
 {
-	return ActiveWeaponSlot == 0 ? CurrentWeapon : SecondaryWeapon;
+	return ActiveWeaponSlot == 0 ? PrimaryWeapon : SecondaryWeapon;
 }
 
 void AFPSCharacter::BeginPlay()
@@ -65,21 +65,21 @@ void AFPSCharacter::BeginPlay()
 	Super::BeginPlay();
 
 	// Weapons are only spawned on the server.
-	if (HasAuthority() && WeaponClass && !CurrentWeapon)
+	if (HasAuthority() && WeaponClass && !PrimaryWeapon)
 	{
-		CurrentWeapon = GetWorld()->SpawnActorDeferred<AFPSWeapon>(WeaponClass, FTransform::Identity, this, this);
-		if (CurrentWeapon)
+		PrimaryWeapon = GetWorld()->SpawnActorDeferred<AFPSWeapon>(WeaponClass, FTransform::Identity, this, this);
+		if (PrimaryWeapon)
 		{
-			CurrentWeapon->SetOwningCharacter(this);
-			CurrentWeapon->FinishSpawning(FTransform::Identity);
-			CurrentWeapon->ServerResetAmmo();
+			PrimaryWeapon->SetOwningCharacter(this);
+			PrimaryWeapon->FinishSpawning(FTransform::Identity);
+			PrimaryWeapon->ServerResetAmmo();
 		}
 
-		if (CurrentWeapon)
+		if (PrimaryWeapon)
 		{
 			GetWorld()->GetTimerManager().SetTimerForNextTick([this]()
 			{
-				if (CurrentWeapon && !bWeaponEquipped)
+				if (PrimaryWeapon && !bWeaponEquipped)
 				{
 					bWeaponEquipped = true;
 					OnWeaponEquipped();
@@ -152,10 +152,10 @@ void AFPSCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 	if (HasAuthority())
 	{
-		if (CurrentWeapon && !CurrentWeapon->IsOnGround())
+		if (PrimaryWeapon && !PrimaryWeapon->IsOnGround())
 		{
-			CurrentWeapon->Destroy();
-			CurrentWeapon = nullptr;
+			PrimaryWeapon->Destroy();
+			PrimaryWeapon = nullptr;
 		}
 		if (SecondaryWeapon && !SecondaryWeapon->IsOnGround())
 		{
@@ -179,7 +179,7 @@ void AFPSCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLif
 	DOREPLIFETIME_CONDITION(AFPSCharacter, Health, COND_None);
 	DOREPLIFETIME_CONDITION(AFPSCharacter, Stamina, COND_None);
 	DOREPLIFETIME_CONDITION(AFPSCharacter, bIsDead, COND_None);
-	DOREPLIFETIME_CONDITION(AFPSCharacter, CurrentWeapon, COND_None);
+	DOREPLIFETIME_CONDITION(AFPSCharacter, PrimaryWeapon, COND_None);
 	DOREPLIFETIME_CONDITION(AFPSCharacter, SecondaryWeapon, COND_None);
 	DOREPLIFETIME_CONDITION(AFPSCharacter, ActiveWeaponSlot, COND_None);
 	DOREPLIFETIME_CONDITION(AFPSCharacter, ArmPitch, COND_None);
@@ -224,8 +224,8 @@ void AFPSCharacter::Die(AController* Killer)
 	DeactivateHoT();
 
 	// Stop fire on all equipped weapons.
-	if (CurrentWeapon)
-		CurrentWeapon->StopFire();
+	if (PrimaryWeapon)
+		PrimaryWeapon->StopFire();
 	if (SecondaryWeapon)
 		SecondaryWeapon->StopFire();
 
@@ -242,14 +242,14 @@ void AFPSCharacter::Die(AController* Killer)
 
 	// Drop the highest-value weapon, destroy the other.
 	AFPSWeapon* WeaponToDrop = nullptr;
-	if (CurrentWeapon && SecondaryWeapon)
+	if (PrimaryWeapon && SecondaryWeapon)
 	{
-		WeaponToDrop = (CurrentWeapon->GetWeaponValue() >= SecondaryWeapon->GetWeaponValue())
-			? CurrentWeapon.Get() : SecondaryWeapon.Get();
+		WeaponToDrop = (PrimaryWeapon->GetWeaponValue() >= SecondaryWeapon->GetWeaponValue())
+			? PrimaryWeapon.Get() : SecondaryWeapon.Get();
 	}
-	else if (CurrentWeapon)
+	else if (PrimaryWeapon)
 	{
-		WeaponToDrop = CurrentWeapon;
+		WeaponToDrop = PrimaryWeapon;
 	}
 	else if (SecondaryWeapon)
 	{
@@ -259,7 +259,7 @@ void AFPSCharacter::Die(AController* Killer)
 	if (WeaponToDrop)
 	{
 		const bool bDroppedActive = (WeaponToDrop == GetActiveWeapon());
-		const int32 DroppedSlot = (WeaponToDrop == CurrentWeapon) ? 0 : 1;
+		const int32 DroppedSlot = (WeaponToDrop == PrimaryWeapon) ? 0 : 1;
 
 		// Detach from character and place in world.
 		const FVector SpawnLoc = GetActorLocation()
@@ -268,7 +268,7 @@ void AFPSCharacter::Die(AController* Killer)
 		WeaponToDrop->PlaceInWorld(SpawnLoc);
 
 		if (DroppedSlot == 0)
-			CurrentWeapon = nullptr;
+			PrimaryWeapon = nullptr;
 		else
 			SecondaryWeapon = nullptr;
 
@@ -278,16 +278,16 @@ void AFPSCharacter::Die(AController* Killer)
 			SecondaryWeapon->Destroy();
 			SecondaryWeapon = nullptr;
 		}
-		else if (DroppedSlot == 1 && CurrentWeapon)
+		else if (DroppedSlot == 1 && PrimaryWeapon)
 		{
-			CurrentWeapon->Destroy();
-			CurrentWeapon = nullptr;
+			PrimaryWeapon->Destroy();
+			PrimaryWeapon = nullptr;
 		}
 
 		// If we dropped the active weapon, switch to the surviving one.
 		if (bDroppedActive && SecondaryWeapon)
 			ActiveWeaponSlot = 1;
-		else if (bDroppedActive && CurrentWeapon)
+		else if (bDroppedActive && PrimaryWeapon)
 			ActiveWeaponSlot = 0;
 	}
 
@@ -330,22 +330,22 @@ void AFPSCharacter::Respawn(const FVector& SpawnLocation, const FRotator& SpawnR
 	OnStaminaChanged.Broadcast(Stamina, MaxStamina);
 
 	// Reset surviving weapon ammo; respawn default if only weapon was dropped.
-	if (CurrentWeapon)
+	if (PrimaryWeapon)
 	{
-		CurrentWeapon->ServerResetAmmo();
+		PrimaryWeapon->ServerResetAmmo();
 	}
 	else if (WeaponClass)
 	{
-		CurrentWeapon = GetWorld()->SpawnActorDeferred<AFPSWeapon>(WeaponClass, FTransform::Identity, this, this);
-		if (CurrentWeapon)
+		PrimaryWeapon = GetWorld()->SpawnActorDeferred<AFPSWeapon>(WeaponClass, FTransform::Identity, this, this);
+		if (PrimaryWeapon)
 		{
-			CurrentWeapon->SetOwningCharacter(this);
-			CurrentWeapon->FinishSpawning(FTransform::Identity);
-			CurrentWeapon->ServerResetAmmo();
+			PrimaryWeapon->SetOwningCharacter(this);
+			PrimaryWeapon->FinishSpawning(FTransform::Identity);
+			PrimaryWeapon->ServerResetAmmo();
 
 			GetWorld()->GetTimerManager().SetTimerForNextTick([this]()
 			{
-				if (CurrentWeapon)
+				if (PrimaryWeapon)
 					OnWeaponEquipped();
 			});
 		}
@@ -368,8 +368,8 @@ void AFPSCharacter::SetDeathPresentation(bool bDead)
 	if (USkeletalMeshComponent* MeshComp = GetMesh())
 		MeshComp->SetVisibility(!bDead, /*bPropagateToChildren=*/true);
 
-	if (CurrentWeapon)
-		CurrentWeapon->SetActorHiddenInGame(bDead);
+	if (PrimaryWeapon)
+		PrimaryWeapon->SetActorHiddenInGame(bDead);
 
 	if (SecondaryWeapon)
 		SecondaryWeapon->SetActorHiddenInGame(bDead);
@@ -382,9 +382,9 @@ void AFPSCharacter::OnRep_Health(float OldHealth)
 	OnHealthChanged.Broadcast(Health, MaxHealth);
 }
 
-void AFPSCharacter::OnRep_CurrentWeapon(AFPSWeapon* OldWeapon)
+void AFPSCharacter::OnRep_PrimaryWeapon(AFPSWeapon* OldWeapon)
 {
-	if (CurrentWeapon && !bWeaponEquipped)
+	if (PrimaryWeapon && !bWeaponEquipped)
 	{
 		bWeaponEquipped = true;
 		OnWeaponEquipped();
@@ -402,8 +402,8 @@ void AFPSCharacter::OnRep_SecondaryWeapon(AFPSWeapon* OldWeapon)
 
 void AFPSCharacter::OnRep_ActiveWeaponSlot()
 {
-	if (CurrentWeapon)
-		CurrentWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 0);
+	if (PrimaryWeapon)
+		PrimaryWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 0);
 	if (SecondaryWeapon)
 		SecondaryWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 1);
 }
@@ -786,8 +786,8 @@ void AFPSCharacter::ServerSwitchWeapon_Implementation(int32 NewSlot)
 	ActiveWeaponSlot = NewSlot;
 
 	// Server host manually toggles visibility.
-	if (CurrentWeapon)
-		CurrentWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 0);
+	if (PrimaryWeapon)
+		PrimaryWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 0);
 	if (SecondaryWeapon)
 		SecondaryWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 1);
 }
@@ -803,7 +803,7 @@ void AFPSCharacter::EquipWeapon(AFPSWeapon* Weapon, int32 Slot)
 
 	if (Slot == 0)
 	{
-		CurrentWeapon = Weapon;
+		PrimaryWeapon = Weapon;
 	}
 	else
 	{
@@ -811,8 +811,8 @@ void AFPSCharacter::EquipWeapon(AFPSWeapon* Weapon, int32 Slot)
 	}
 
 	// Set visibility based on active slot.
-	if (CurrentWeapon)
-		CurrentWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 0);
+	if (PrimaryWeapon)
+		PrimaryWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 0);
 	if (SecondaryWeapon)
 		SecondaryWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 1);
 
@@ -828,11 +828,6 @@ void AFPSCharacter::EquipWeapon(AFPSWeapon* Weapon, int32 Slot)
 
 void AFPSCharacter::SetWeaponPickupTarget(AFPSWeapon* Weapon)
 {
-	if (CurrentWeaponPickupTarget == Weapon)
-		return;
-
-	CurrentWeaponPickupTarget = Weapon;
-
 	if (InteractionManager && Weapon)
 	{
 		InteractionManager->RegisterInteraction(Weapon,
@@ -840,20 +835,12 @@ void AFPSCharacter::SetWeaponPickupTarget(AFPSWeapon* Weapon)
 			FText::FromString(TEXT("Swap weapon")),
 			100);
 	}
-
-	OnWeaponPickupTargetChanged.Broadcast();
 }
 
 void AFPSCharacter::ClearWeaponPickupTarget(AFPSWeapon* Weapon)
 {
-	if (CurrentWeaponPickupTarget != Weapon)
-		return;
-
-	if (InteractionManager && CurrentWeaponPickupTarget)
-		InteractionManager->UnregisterInteraction(CurrentWeaponPickupTarget);
-
-	CurrentWeaponPickupTarget = nullptr;
-	OnWeaponPickupTargetChanged.Broadcast();
+	if (InteractionManager && Weapon)
+		InteractionManager->UnregisterInteraction(Weapon);
 }
 
 void AFPSCharacter::ServerTryPickupWeapon_Implementation()
@@ -861,25 +848,23 @@ void AFPSCharacter::ServerTryPickupWeapon_Implementation()
 	if (!HasAuthority())
 		return;
 
-	// 服务端也用 CurrentWeaponPickupTarget（由武器 overlap 在服务端设置），加距离校验。
-	if (!CurrentWeaponPickupTarget || !CurrentWeaponPickupTarget->IsOnGround())
+	AFPSWeapon* Weapon = GetWeaponPickupTarget();
+	if (!Weapon || !Weapon->IsOnGround())
 		return;
 
-	const float Dist = FVector::Dist(GetActorLocation(), CurrentWeaponPickupTarget->GetActorLocation());
-	if (Dist > CurrentWeaponPickupTarget->GetPickupRadius() + 50.0f)
+	const float Dist = FVector::Dist(GetActorLocation(), Weapon->GetActorLocation());
+	if (Dist > Weapon->GetPickupRadius() + 50.0f)
 		return;
-
-	AFPSWeapon* Weapon = CurrentWeaponPickupTarget;
 
 	// 0 guns: equip as primary.
-	if (!CurrentWeapon && !SecondaryWeapon)
+	if (!PrimaryWeapon && !SecondaryWeapon)
 	{
 		EquipWeapon(Weapon, 0);
 		return;
 	}
 
 	// 1 gun: equip to free slot.
-	if (!CurrentWeapon)
+	if (!PrimaryWeapon)
 	{
 		EquipWeapon(Weapon, 0);
 		return;
@@ -1116,7 +1101,6 @@ void AFPSCharacter::Interact()
 	if (IsActionLocked())
 		return;
 
-	// 交互管理器优先：按选中的交互条目路由行为。
 	if (InteractionManager && InteractionManager->GetEntryCount() > 0)
 	{
 		switch (InteractionManager->GetActiveType())
@@ -1132,18 +1116,6 @@ void AFPSCharacter::Interact()
 			return;
 		}
 	}
-
-	// 兜底（交互管理器无条目时走旧逻辑）。
-	if (CurrentWeaponPickupTarget)
-	{
-		ServerTryPickupWeapon();
-		return;
-	}
-
-	if (!CurrentPickupTarget)
-		return;
-
-	ServerTryPickup();
 }
 
 // ---------------------------------------------------------------------------
@@ -1172,16 +1144,69 @@ void AFPSCharacter::CycleInteractionInput(const FInputActionValue& Value)
 }
 
 // ---------------------------------------------------------------------------
+// Interaction target queries
+// ---------------------------------------------------------------------------
+
+AFPSPickup* AFPSCharacter::GetPickupTarget() const
+{
+	if (!InteractionManager)
+		return nullptr;
+
+	AActor* Active = InteractionManager->GetActiveTarget();
+	if (Active && InteractionManager->GetActiveType() == EFPSInteractionType::Pickup)
+		return Cast<AFPSPickup>(Active);
+
+	for (const FFPSInteractionEntry& E : InteractionManager->GetEntries())
+	{
+		if (E.Type == EFPSInteractionType::Pickup)
+			return Cast<AFPSPickup>(E.Source);
+	}
+
+	return nullptr;
+}
+
+AFPSWeapon* AFPSCharacter::GetWeaponPickupTarget() const
+{
+	if (!InteractionManager)
+		return nullptr;
+
+	AActor* Active = InteractionManager->GetActiveTarget();
+	if (Active && InteractionManager->GetActiveType() == EFPSInteractionType::WeaponPickup)
+		return Cast<AFPSWeapon>(Active);
+
+	for (const FFPSInteractionEntry& E : InteractionManager->GetEntries())
+	{
+		if (E.Type == EFPSInteractionType::WeaponPickup)
+			return Cast<AFPSWeapon>(E.Source);
+	}
+
+	return nullptr;
+}
+
+AFPSSubmissionPoint* AFPSCharacter::GetSubmissionTarget() const
+{
+	if (!InteractionManager)
+		return nullptr;
+
+	AActor* Active = InteractionManager->GetActiveTarget();
+	if (Active && InteractionManager->GetActiveType() == EFPSInteractionType::SubmissionPoint)
+		return Cast<AFPSSubmissionPoint>(Active);
+
+	for (const FFPSInteractionEntry& E : InteractionManager->GetEntries())
+	{
+		if (E.Type == EFPSInteractionType::SubmissionPoint)
+			return Cast<AFPSSubmissionPoint>(E.Source);
+	}
+
+	return nullptr;
+}
+
+// ---------------------------------------------------------------------------
 // Submission system
 // ---------------------------------------------------------------------------
 
 void AFPSCharacter::SetSubmissionTarget(AFPSSubmissionPoint* Point)
 {
-	if (CurrentSubmissionTarget == Point)
-		return;
-
-	CurrentSubmissionTarget = Point;
-
 	if (InteractionManager && Point)
 	{
 		InteractionManager->RegisterInteraction(Point,
@@ -1189,29 +1214,18 @@ void AFPSCharacter::SetSubmissionTarget(AFPSSubmissionPoint* Point)
 			FText::FromString(TEXT("Submit valuables")),
 			50);
 	}
-	else if (InteractionManager)
-	{
-		InteractionManager->UnregisterInteraction(Point);
-	}
-
-	OnSubmissionTargetChanged.Broadcast();
 }
 
 void AFPSCharacter::ClearSubmissionTarget(AFPSSubmissionPoint* Point)
 {
-	if (CurrentSubmissionTarget != Point)
-		return;
-
-	if (InteractionManager && CurrentSubmissionTarget)
-		InteractionManager->UnregisterInteraction(CurrentSubmissionTarget);
-
-	CurrentSubmissionTarget = nullptr;
-	OnSubmissionTargetChanged.Broadcast();
+	if (InteractionManager && Point)
+		InteractionManager->UnregisterInteraction(Point);
 }
 
 bool AFPSCharacter::CanSubmitItems() const
 {
-	return CurrentSubmissionTarget && CurrentSubmissionTarget->IsOpen();
+	AFPSSubmissionPoint* Point = GetSubmissionTarget();
+	return Point && Point->IsOpen();
 }
 
 void AFPSCharacter::SubmitInventoryItem(int32 Index)
@@ -1227,8 +1241,9 @@ void AFPSCharacter::ServerSubmitAllValuables_Implementation()
 	if (!HasAuthority())
 		return;
 
-	if (CurrentSubmissionTarget && CurrentSubmissionTarget->IsOpen())
-		CurrentSubmissionTarget->SubmitAllValuables(this);
+	AFPSSubmissionPoint* Point = GetSubmissionTarget();
+	if (Point && Point->IsOpen())
+		Point->SubmitAllValuables(this);
 }
 
 void AFPSCharacter::ServerSubmitSingleItem_Implementation(int32 Index)
@@ -1236,8 +1251,9 @@ void AFPSCharacter::ServerSubmitSingleItem_Implementation(int32 Index)
 	if (!HasAuthority())
 		return;
 
-	if (CurrentSubmissionTarget && CurrentSubmissionTarget->IsOpen())
-		CurrentSubmissionTarget->SubmitSingleItem(this, Index);
+	AFPSSubmissionPoint* Point = GetSubmissionTarget();
+	if (Point && Point->IsOpen())
+		Point->SubmitSingleItem(this, Index);
 }
 
 // ---------------------------------------------------------------------------
@@ -1354,23 +1370,19 @@ void AFPSCharacter::ServerTryPickup_Implementation()
 	if (!HasAuthority())
 		return;
 
-	if (!CurrentPickupTarget)
+	AFPSPickup* Target = GetPickupTarget();
+	if (!Target)
 		return;
 
-	const float Dist = FVector::Dist(GetActorLocation(), CurrentPickupTarget->GetActorLocation());
-	if (Dist > CurrentPickupTarget->GetPickupRadius() + 50.0f)
+	const float Dist = FVector::Dist(GetActorLocation(), Target->GetActorLocation());
+	if (Dist > Target->GetPickupRadius() + 50.0f)
 		return;
 
-	CurrentPickupTarget->ServerTryPickup(this);
+	Target->ServerTryPickup(this);
 }
 
 void AFPSCharacter::SetPickupTarget(AFPSPickup* Pickup)
 {
-	if (CurrentPickupTarget == Pickup)
-		return;
-
-	CurrentPickupTarget = Pickup;
-
 	if (InteractionManager && Pickup && Pickup->GetItemDef())
 	{
 		const FText Prompt = FText::Format(
@@ -1379,20 +1391,12 @@ void AFPSCharacter::SetPickupTarget(AFPSPickup* Pickup)
 		InteractionManager->RegisterInteraction(Pickup,
 			EFPSInteractionType::Pickup, Prompt, 0);
 	}
-
-	OnPickupTargetChanged.Broadcast();
 }
 
 void AFPSCharacter::ClearPickupTarget(AFPSPickup* Pickup)
 {
-	if (CurrentPickupTarget != Pickup)
-		return;
-
-	if (InteractionManager && CurrentPickupTarget)
-		InteractionManager->UnregisterInteraction(CurrentPickupTarget);
-
-	CurrentPickupTarget = nullptr;
-	OnPickupTargetChanged.Broadcast();
+	if (InteractionManager && Pickup)
+		InteractionManager->UnregisterInteraction(Pickup);
 }
 
 // ---------------------------------------------------------------------------

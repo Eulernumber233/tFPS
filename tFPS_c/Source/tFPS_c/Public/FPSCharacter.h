@@ -148,7 +148,7 @@ public:
 	void Respawn(const FVector& SpawnLocation, const FRotator& SpawnRotation);
 
 	UFUNCTION(BlueprintCallable, Category = "Weapon")
-	AFPSWeapon* GetWeapon() const { return CurrentWeapon; }
+	AFPSWeapon* GetWeapon() const { return PrimaryWeapon; }
 
 	/** 当前活跃武器（0=主武器，1=副武器）。蓝图层读取用于开火/换弹等操作。 */
 	UFUNCTION(BlueprintCallable, Category = "Weapon")
@@ -173,13 +173,9 @@ public:
 	/** 清除可拾取武器目标。仅当 Pickup 是当前目标才清。 */
 	void ClearWeaponPickupTarget(AFPSWeapon* Weapon);
 
-	/** 当前可拾取武器目标（蓝图读取，非空表示可显示"按 F 换枪"提示）。 */
+	/** 当前可拾取武器目标（从交互管理器查询，蓝图读取）。 */
 	UFUNCTION(BlueprintCallable, Category = "Weapon")
-	AFPSWeapon* GetWeaponPickupTarget() const { return CurrentWeaponPickupTarget; }
-
-	/** 可拾取武器目标变化事件（进入/离开范围）——蓝图绑定显示/隐藏换枪提示 UI。 */
-	UPROPERTY(BlueprintAssignable, Category = "Weapon")
-	FOnActionEvent OnWeaponPickupTargetChanged;
+	AFPSWeapon* GetWeaponPickupTarget() const;
 
 	// ---- 背包 / 道具系统 ----
 
@@ -213,13 +209,9 @@ public:
 	/** 清除可拾取目标（Pickup 离开范围 / 被销毁时调用）。仅当 Pickup 是当前目标才清。 */
 	void ClearPickupTarget(AFPSPickup* Pickup);
 
-	/** 当前可拾取目标（蓝图读取，非空表示可显示"按F拾取 XXX"提示）。 */
+	/** 当前可拾取目标（从交互管理器查询，蓝图读取）。 */
 	UFUNCTION(BlueprintCallable, Category = "Inventory")
-	AFPSPickup* GetPickupTarget() const { return CurrentPickupTarget; }
-
-	/** 可拾取目标变化事件（进入/离开范围）—— 蓝图绑定显示/隐藏拾取提示 UI。 */
-	UPROPERTY(BlueprintAssignable, Category = "Inventory")
-	FOnActionEvent OnPickupTargetChanged;
+	AFPSPickup* GetPickupTarget() const;
 
 	// ---- 交互管理系统 ----
 
@@ -243,9 +235,9 @@ public:
 	/** 清除当前提交点（离开范围 / 提交点关闭时调用）。 */
 	void ClearSubmissionTarget(AFPSSubmissionPoint* Point);
 
-	/** 当前可提交目标（蓝图读取，非空且开放时显示提交 UI）。 */
+	/** 当前可提交目标（从交互管理器查询，蓝图读取）。 */
 	UFUNCTION(BlueprintCallable, Category = "Submission")
-	AFPSSubmissionPoint* GetSubmissionTarget() const { return CurrentSubmissionTarget; }
+	AFPSSubmissionPoint* GetSubmissionTarget() const;
 
 	/** 是否可以在当前提交点提交物品（附近有开放提交点 + 背包有贵重品）。 */
 	UFUNCTION(BlueprintCallable, Category = "Submission")
@@ -257,10 +249,6 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Submission")
 	void SubmitInventoryItem(int32 Index);
-
-	/** 提交目标变化事件 —— 蓝图绑定显示/隐藏提交提示 UI。 */
-	UPROPERTY(BlueprintAssignable, Category = "Submission")
-	FOnActionEvent OnSubmissionTargetChanged;
 
 	/**
 	 * 切换背包面板（按 E，本地表现）。C++ 只负责绑 E 键并转发到这里，
@@ -475,10 +463,10 @@ public:
 protected:
 	/** Called on clients when server's authoritative weapon replicates — clean up local weapon */
 	UFUNCTION()
-	void OnRep_CurrentWeapon(AFPSWeapon* OldWeapon);
+	void OnRep_PrimaryWeapon(AFPSWeapon* OldWeapon);
 
-	UPROPERTY(ReplicatedUsing = OnRep_CurrentWeapon, BlueprintReadOnly, Category = "Weapon")
-	TObjectPtr<AFPSWeapon> CurrentWeapon;
+	UPROPERTY(ReplicatedUsing = OnRep_PrimaryWeapon, BlueprintReadOnly, Category = "Weapon")
+	TObjectPtr<AFPSWeapon> PrimaryWeapon;
 
 	/** Called on clients when secondary weapon replicates */
 	UFUNCTION()
@@ -491,6 +479,7 @@ protected:
 	UPROPERTY(ReplicatedUsing = OnRep_ActiveWeaponSlot)
 	int32 ActiveWeaponSlot = 0;
 
+	/** 切换活跃武器 */
 	UFUNCTION()
 	void OnRep_ActiveWeaponSlot();
 
@@ -677,18 +666,6 @@ protected:
 	/** 交互管理器（构造时创建，不复制——每端本地管理自己的交互目标列表）。 */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Interaction")
 	TObjectPtr<UFPSInteractionComponent> InteractionManager;
-
-	/** 当前范围内可拾取的 Pickup（本地状态，不复制；overlap 在每端各自维护）。 */
-	UPROPERTY()
-	TObjectPtr<AFPSPickup> CurrentPickupTarget = nullptr;
-
-	/** 当前范围内可拾取的武器 Pickup（本地状态，不复制）。 */
-	UPROPERTY()
-	TObjectPtr<AFPSWeapon> CurrentWeaponPickupTarget = nullptr;
-
-	/** 当前范围内开放的提交点（本地状态，不复制）。 */
-	UPROPERTY()
-	TObjectPtr<AFPSSubmissionPoint> CurrentSubmissionTarget = nullptr;
 
 	/** 背包面板是否打开（本地状态，不复制）。 */
 	bool bInventoryOpen = false;
