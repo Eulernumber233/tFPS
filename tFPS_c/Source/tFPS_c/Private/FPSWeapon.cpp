@@ -41,7 +41,13 @@ void AFPSWeapon::BeginPlay()
 	PickupSphere->OnComponentBeginOverlap.AddDynamic(this, &AFPSWeapon::OnPickupSphereBeginOverlap);
 	PickupSphere->OnComponentEndOverlap.AddDynamic(this, &AFPSWeapon::OnPickupSphereEndOverlap);
 
-	if (bIsOnGround)
+	if (bStartAsGroundItem && HasAuthority())
+	{
+		bIsOnGround = true;
+		PickupSphere->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+		PickupSphere->SetGenerateOverlapEvents(true);
+	}
+	else if (bIsOnGround)
 	{
 		PickupSphere->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 		PickupSphere->SetGenerateOverlapEvents(true);
@@ -100,6 +106,15 @@ void AFPSWeapon::RemoveFromWorld()
 {
 	if (!HasAuthority())
 		return;
+
+	// Clear pickup targets from overlapping characters before disabling collision.
+	TArray<AActor*> Overlapping;
+	PickupSphere->GetOverlappingActors(Overlapping, AFPSCharacter::StaticClass());
+	for (AActor* A : Overlapping)
+	{
+		if (AFPSCharacter* C = Cast<AFPSCharacter>(A))
+			C->ClearWeaponPickupTarget(this);
+	}
 
 	bIsOnGround = false;
 	PickupSphere->SetCollisionEnabled(ECollisionEnabled::NoCollision);
@@ -311,7 +326,12 @@ void AFPSWeapon::ServerResetAmmo()
 	bIsReloading = false;
 
 	LoadedAmmo.Empty();
-	LoadedAmmo.Add({nullptr, MagSize});
+
+	UFPSAmmoItemDef* FillDef = nullptr;
+	if (InitialAmmoDef && !AcceptedCaliber.IsNone() && InitialAmmoDef->Caliber == AcceptedCaliber)
+		FillDef = InitialAmmoDef;
+
+	LoadedAmmo.Add({FillDef, MagSize});
 
 	OnRep_Ammo();
 	OnRep_IsReloading();
@@ -418,9 +438,34 @@ void AFPSWeapon::FinishReload()
 	Inv->MarkItemsDirty();
 }
 
+void AFPSWeapon::OnRep_IsOnGround()
+{
+	if (bIsOnGround)
+	{
+		PickupSphere->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+		PickupSphere->SetGenerateOverlapEvents(true);
+	}
+	else
+	{
+		// Clear pickup targets before disabling collision — the sphere has already
+		// moved (attached to character's arm), so disabling it here won't fire
+		// end-overlap events. We must manually unregister from InteractionManager.
+		TArray<AActor*> Overlapping;
+		PickupSphere->GetOverlappingActors(Overlapping, AFPSCharacter::StaticClass());
+		for (AActor* A : Overlapping)
+		{
+			if (AFPSCharacter* C = Cast<AFPSCharacter>(A))
+				C->ClearWeaponPickupTarget(this);
+		}
+
+		PickupSphere->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		PickupSphere->SetGenerateOverlapEvents(false);
+	}
+}
+
 void AFPSWeapon::OnRep_Ammo()
 {
-	OnAmmoChanged.Broadcast(GetCurrentAmmo(), GetComputedReserveAmmo());
+	//OnAmmoChanged.Broadcast(GetCurrentAmmo(), GetComputedReserveAmmo());
 }
 
 void AFPSWeapon::OnRep_IsReloading()

@@ -9,7 +9,7 @@ class UFPSAmmoItemDef;
 class USphereComponent;
 
 /** 弹药变化事件：弹夹数 / 备弹总数（背包中同口径子弹合计）。每端本机广播（服务端权威值复制后触发）。 */
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnAmmoChanged, int32, CurrentAmmo, int32, ReserveAmmo);
+// DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnAmmoChanged, int32, CurrentAmmo, int32, ReserveAmmo);
 
 UCLASS()
 class TFPS_C_API AFPSWeapon : public AActor
@@ -60,6 +60,9 @@ public:
 	int32 GetMagSize() const { return MagSize; }
 
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Ammo")
+	FText GetWeaponName () const { return WeaponName; }
+
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Ammo")
 	bool IsReloading() const { return bIsReloading; }
 
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Ammo")
@@ -85,8 +88,8 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapon")
 	int32 GetWeaponValue() const { return WeaponValue; }
 
-	UPROPERTY(BlueprintAssignable, Category = "Weapon|Ammo")
-	FOnAmmoChanged OnAmmoChanged;
+	//UPROPERTY(BlueprintAssignable, Category = "Weapon|Ammo")
+	//FOnAmmoChanged OnAmmoChanged;
 
 	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon|Ammo")
 	void OnReloadStart();
@@ -116,6 +119,9 @@ protected:
 	void GetAimViewPoint(FVector& OutLocation, FRotator& OutRotation) const;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Config")
+	FText WeaponName;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Config")
 	float FireRate = 0.1f;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Config")
@@ -134,6 +140,9 @@ protected:
 	FName AcceptedCaliber = NAME_None;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Ammo")
+	TObjectPtr<UFPSAmmoItemDef> InitialAmmoDef = nullptr;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Ammo")
 	float ReloadTime = 2.0f;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Weapon")
@@ -147,11 +156,18 @@ protected:
 	UPROPERTY(VisibleAnywhere, Category = "Weapon|Pickup")
 	TObjectPtr<USphereComponent> PickupSphere;
 
+	/** 生成时即作为场景掉落物（不在玩家手上）。仅在 HasAuthority 时生效。 */
+	UPROPERTY(EditAnywhere, Category = "Weapon|Pickup")
+	uint8 bStartAsGroundItem : 1 = false;
+
 	UPROPERTY(EditAnywhere, Category = "Weapon|Pickup")
 	float PickupRadius = 120.0f;
 
-	UPROPERTY(Replicated)
+	UPROPERTY(ReplicatedUsing = OnRep_IsOnGround)
 	uint8 bIsOnGround : 1;
+
+	UFUNCTION()
+	void OnRep_IsOnGround();
 
 	// ---- 复制属性 ----
 

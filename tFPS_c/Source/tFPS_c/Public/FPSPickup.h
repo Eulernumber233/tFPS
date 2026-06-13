@@ -8,20 +8,27 @@
 class UFPSItemDef;
 class USphereComponent;
 class USceneComponent;
+class UStaticMeshComponent;
 class AFPSCharacter;
 
 /**
  * 地上的拾取物 Actor（复制）。
  *
- * 沿用项目 AFPSWeapon 的"C++ 空 Root，蓝图加 Mesh"约定：
- *   - C++ 提供 DefaultRoot（USceneComponent）+ 一个 USphereComponent 触发器（拾取范围）
- *   - 蓝图子类（如 BP_Pickup_HealLarge）在 DefaultRoot 下加 StaticMesh（药包模型）
+ * C++ 提供完整组件层级：
+ *   - DefaultRoot（USceneComponent）
+ *   - PickupMeshComponent（UStaticMeshComponent）：OnConstruction/BeginPlay 从 ItemDef->PickupMesh 自动赋值
+ *   - PickupSphere（USphereComponent）：拾取范围触发器
+ *
+ * 通用用法：建一个 BP_Pickup_Generic 继承本类，不需要加任何组件。
+ *   ItemDef 的 PickupMesh 填什么模型，地上就显示什么模型。
+ * 特殊用法：需要专属粒子/动画的道具，单独建 BP_Pickup_xxx 子类，
+ *   DA 的 PickupMesh 留空、DropPickupClass 指向专用子类。
  *
  * 交互（走近按 F）：
  *   玩家进入 Sphere → 角色端记录"当前可拾取目标"（蓝图据此显示"按F"提示）
  *   按 F → 角色发 ServerTryPickup → 这里把 ItemDef 塞进玩家背包 → 成功则 Destroy
  *
- * ItemDef 由蓝图子类在细节面板指定（指向某个 DA_xxx 数据资产）。
+ * ItemDef 由蓝图子类或在场景中手摆时指定（指向某个 DA_xxx 数据资产）。
  */
 UCLASS()
 class TFPS_C_API AFPSPickup : public AActor
@@ -65,10 +72,15 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void OnConstruction(const FTransform& Transform) override;
 
 	/** C++ 默认根：保证蓝图子类无论是否重设 root，attach 都成功（同 AFPSWeapon）。 */
 	UPROPERTY(VisibleAnywhere, Category = "Pickup")
 	TObjectPtr<USceneComponent> DefaultRoot;
+
+	/** 地上显示的网格体。OnConstruction 从 ItemDef->PickupMesh 自动赋值。专用子类可不设 DA 的 PickupMesh，改在蓝图层替换此组件。 */
+	UPROPERTY(VisibleAnywhere, Category = "Pickup")
+	TObjectPtr<UStaticMeshComponent> PickupMeshComponent;
 
 	/** 拾取范围触发器。 */
 	UPROPERTY(VisibleAnywhere, Category = "Pickup")
@@ -85,6 +97,9 @@ protected:
 	/** 丢弃时携带的运行时状态（耐久/数量），bHasOverride 为 true 时拾取按它入背包。 */
 	UPROPERTY(Replicated)
 	FInventoryEntry OverrideEntry;
+
+	/** 从 ItemDef->PickupMesh 读取并赋给 PickupMeshComponent。OnConstruction + BeginPlay 各调一次。 */
+	void ApplyPickupMeshFromItemDef();
 
 	UFUNCTION()
 	void OnSphereBeginOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,

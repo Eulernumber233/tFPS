@@ -3,6 +3,8 @@
 #include "FPSCharacter.h"
 #include "FPSInventoryComponent.h"
 #include "Components/SphereComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
 #include "Net/UnrealNetwork.h"
 
 AFPSPickup::AFPSPickup()
@@ -13,6 +15,12 @@ AFPSPickup::AFPSPickup()
 	// C++ 空 Root（同 AFPSWeapon）：蓝图子类在其下挂 Mesh。
 	DefaultRoot = CreateDefaultSubobject<USceneComponent>(TEXT("DefaultRoot"));
 	SetRootComponent(DefaultRoot);
+
+	// 地上网格体：OnConstruction 从 ItemDef->PickupMesh 自动赋值。
+	// 专用蓝图子类如不需要此组件，可在蓝图层隐藏/替换。
+	PickupMeshComponent = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("PickupMesh"));
+	PickupMeshComponent->SetupAttachment(DefaultRoot);
+	PickupMeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
 	// 拾取范围触发器。只做 overlap 检测，不挡任何东西。
 	PickupSphere = CreateDefaultSubobject<USphereComponent>(TEXT("PickupSphere"));
@@ -51,6 +59,30 @@ void AFPSPickup::BeginPlay()
 	PickupSphere->SetSphereRadius(PickupRadius);
 	PickupSphere->OnComponentBeginOverlap.AddDynamic(this, &AFPSPickup::OnSphereBeginOverlap);
 	PickupSphere->OnComponentEndOverlap.AddDynamic(this, &AFPSPickup::OnSphereEndOverlap);
+
+	// 运行时也刷一次：OnConstruction 可能只在服务端 SpawnActor 时跑过，
+	// 客户端 BeginPlay 补一次保证网格体在各端都显示。
+	ApplyPickupMeshFromItemDef();
+}
+
+void AFPSPickup::OnConstruction(const FTransform& Transform)
+{
+	Super::OnConstruction(Transform);
+
+	ApplyPickupMeshFromItemDef();
+}
+
+void AFPSPickup::ApplyPickupMeshFromItemDef()
+{
+	if (!PickupMeshComponent || !ItemDef || ItemDef->PickupMesh.IsNull())
+		return;
+
+	UStaticMesh* Mesh = ItemDef->PickupMesh.LoadSynchronous();
+	if (Mesh)
+	{
+		PickupMeshComponent->SetStaticMesh(Mesh);
+		PickupMeshComponent->SetVisibility(true);
+	}
 }
 
 void AFPSPickup::EndPlay(const EEndPlayReason::Type EndPlayReason)

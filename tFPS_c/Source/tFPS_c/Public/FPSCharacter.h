@@ -148,7 +148,7 @@ public:
 	void Respawn(const FVector& SpawnLocation, const FRotator& SpawnRotation);
 
 	UFUNCTION(BlueprintCallable, Category = "Weapon")
-	AFPSWeapon* GetWeapon() const { return PrimaryWeapon; }
+	AFPSWeapon* GetPrimaryWeapon() const { return PrimaryWeapon; }
 
 	/** 当前活跃武器（0=主武器，1=副武器）。蓝图层读取用于开火/换弹等操作。 */
 	UFUNCTION(BlueprintCallable, Category = "Weapon")
@@ -312,9 +312,9 @@ public:
 
 	/** 武器就绪（服务端生成后 / 客户端收到复制后）— 蓝图实现挂载到手臂骨骼 */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon")
-	void OnWeaponEquipped();
+	void OnPrimaryWeaponEquipped();
 
-	/** 副武器就绪 — 蓝图实现挂载到手臂骨骼（同 OnWeaponEquipped，但拿 GetSecondaryWeapon()）。 */
+	/** 副武器就绪 — 蓝图实现挂载到手臂骨骼（同 OnPrimaryWeaponEquipped，但拿 GetSecondaryWeapon()）。 */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon")
 	void OnSecondaryWeaponEquipped();
 
@@ -604,7 +604,7 @@ protected:
 	uint8 bWantsToAim : 1;
 	uint8 bWantsToFire : 1;
 
-	/** 防止 OnRep 冗余触发导致 OnWeaponEquipped 重复调用 */
+	/** 防止 OnRep 冗余触发导致 OnPrimaryWeaponEquipped 重复调用 */
 	bool bWeaponEquipped = false;
 
 	/** 奔跑打断开火后，松开 Shift 时若 LMB 仍按住是否恢复开火 */

@@ -6,6 +6,27 @@
 
 class AFPSCharacter;
 class AFPSPickup;
+class UStaticMesh;
+
+// LevelColorMapping
+USTRUCT(BlueprintType)
+struct FLevelColor
+{
+	GENERATED_BODY()
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	int32 Level = 0;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FLinearColor Color = FLinearColor::White;
+};
+
+UCLASS(BlueprintType)
+class ULevelColorMapping : public UDataAsset
+{
+	GENERATED_BODY()
+public:
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	TArray<FLevelColor> LevelColors;
+};
 
 /**
  * How an item behaves when "used" from the inventory.
@@ -90,6 +111,11 @@ public:
 	/** 背包格子图标 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Item")
 	TObjectPtr<UTexture2D> Icon = nullptr;
+
+	/** 在地上时的拾取物网格体。通用 BP_Pickup_Generic 在 OnConstruction 里读取此字段自动设模型。
+	 *  为空则显示占位方块（或由专用 BP_Pickup_xxx 子类自行提供模型）。 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Item|Pickup")
+	TSoftObjectPtr<UStaticMesh> PickupMesh = nullptr;
 
 	/** true=带耐久（每个占一格，用 Durability）；false=可堆叠（用 Count，合并成 xN） */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Item")

@@ -82,7 +82,7 @@ void AFPSCharacter::BeginPlay()
 				if (PrimaryWeapon && !bWeaponEquipped)
 				{
 					bWeaponEquipped = true;
-					OnWeaponEquipped();
+					OnPrimaryWeaponEquipped();
 				}
 			});
 		}
@@ -223,7 +223,7 @@ void AFPSCharacter::Die(AController* Killer)
 	CancelItemUse();
 	DeactivateHoT();
 
-	// Stop fire on all equipped weapons.
+	// Stop fire and drop all weapons on ground.
 	if (PrimaryWeapon)
 		PrimaryWeapon->StopFire();
 	if (SecondaryWeapon)
@@ -240,55 +240,19 @@ void AFPSCharacter::Die(AController* Killer)
 	if (AFPSPlayerState* VPS = GetPlayerState<AFPSPlayerState>())
 		VPS->AddDeath();
 
-	// Drop the highest-value weapon, destroy the other.
-	AFPSWeapon* WeaponToDrop = nullptr;
-	if (PrimaryWeapon && SecondaryWeapon)
+	const FVector SpawnLoc = GetActorLocation()
+		+ GetActorForwardVector() * 80.0f
+		+ FVector(0, 0, -40.0f);
+
+	if (PrimaryWeapon)
 	{
-		WeaponToDrop = (PrimaryWeapon->GetWeaponValue() >= SecondaryWeapon->GetWeaponValue())
-			? PrimaryWeapon.Get() : SecondaryWeapon.Get();
+		PrimaryWeapon->PlaceInWorld(SpawnLoc);
+		PrimaryWeapon = nullptr;
 	}
-	else if (PrimaryWeapon)
+	if (SecondaryWeapon)
 	{
-		WeaponToDrop = PrimaryWeapon;
-	}
-	else if (SecondaryWeapon)
-	{
-		WeaponToDrop = SecondaryWeapon;
-	}
-
-	if (WeaponToDrop)
-	{
-		const bool bDroppedActive = (WeaponToDrop == GetActiveWeapon());
-		const int32 DroppedSlot = (WeaponToDrop == PrimaryWeapon) ? 0 : 1;
-
-		// Detach from character and place in world.
-		const FVector SpawnLoc = GetActorLocation()
-			+ GetActorForwardVector() * 80.0f
-			+ FVector(0, 0, -40.0f);
-		WeaponToDrop->PlaceInWorld(SpawnLoc);
-
-		if (DroppedSlot == 0)
-			PrimaryWeapon = nullptr;
-		else
-			SecondaryWeapon = nullptr;
-
-		// Destroy the remaining weapon.
-		if (DroppedSlot == 0 && SecondaryWeapon)
-		{
-			SecondaryWeapon->Destroy();
-			SecondaryWeapon = nullptr;
-		}
-		else if (DroppedSlot == 1 && PrimaryWeapon)
-		{
-			PrimaryWeapon->Destroy();
-			PrimaryWeapon = nullptr;
-		}
-
-		// If we dropped the active weapon, switch to the surviving one.
-		if (bDroppedActive && SecondaryWeapon)
-			ActiveWeaponSlot = 1;
-		else if (bDroppedActive && PrimaryWeapon)
-			ActiveWeaponSlot = 0;
+		SecondaryWeapon->PlaceInWorld(SpawnLoc + GetActorRightVector() * 50.0f);
+		SecondaryWeapon = nullptr;
 	}
 
 	if (AFPSGameMode* GM = Cast<AFPSGameMode>(GetWorld()->GetAuthGameMode()))
@@ -329,12 +293,8 @@ void AFPSCharacter::Respawn(const FVector& SpawnLocation, const FRotator& SpawnR
 	Stamina = MaxStamina;
 	OnStaminaChanged.Broadcast(Stamina, MaxStamina);
 
-	// Reset surviving weapon ammo; respawn default if only weapon was dropped.
-	if (PrimaryWeapon)
-	{
-		PrimaryWeapon->ServerResetAmmo();
-	}
-	else if (WeaponClass)
+	// Always spawn a fresh default weapon on respawn.
+	if (WeaponClass)
 	{
 		PrimaryWeapon = GetWorld()->SpawnActorDeferred<AFPSWeapon>(WeaponClass, FTransform::Identity, this, this);
 		if (PrimaryWeapon)
@@ -346,13 +306,12 @@ void AFPSCharacter::Respawn(const FVector& SpawnLocation, const FRotator& SpawnR
 			GetWorld()->GetTimerManager().SetTimerForNextTick([this]()
 			{
 				if (PrimaryWeapon)
-					OnWeaponEquipped();
+					OnPrimaryWeaponEquipped();
 			});
 		}
 	}
 
-	if (SecondaryWeapon)
-		SecondaryWeapon->ServerResetAmmo();
+	ActiveWeaponSlot = 0;
 
 	bIsDead = false;
 
@@ -387,7 +346,7 @@ void AFPSCharacter::OnRep_PrimaryWeapon(AFPSWeapon* OldWeapon)
 	if (PrimaryWeapon && !bWeaponEquipped)
 	{
 		bWeaponEquipped = true;
-		OnWeaponEquipped();
+		OnPrimaryWeaponEquipped();
 	}
 }
 
@@ -545,7 +504,7 @@ void AFPSCharacter::MoveCompleted(const FInputActionValue& Value)
 
 void AFPSCharacter::StartRun()
 {
-	if (IsActionLocked())
+	if (IsActionLocked()||(Stamina <= RunStartStaminaThreshold))
 		return;
 	bWantsToRun = true;
 	OnRunStarted.Broadcast();
@@ -817,7 +776,7 @@ void AFPSCharacter::EquipWeapon(AFPSWeapon* Weapon, int32 Slot)
 		SecondaryWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 1);
 
 	if (Slot == 0)
-		OnWeaponEquipped();
+		OnPrimaryWeaponEquipped();
 	else
 		OnSecondaryWeaponEquipped();
 }
@@ -876,15 +835,24 @@ void AFPSCharacter::ServerTryPickupWeapon_Implementation()
 	}
 
 	// 2 guns: swap with active weapon - drop old, equip new.
-	AFPSWeapon* OldWeapon = GetActiveWeapon();
-	const int32 Slot = ActiveWeaponSlot;
+	{
+		AFPSWeapon* OldWeapon = GetActiveWeapon();
+		const int32 Slot = ActiveWeaponSlot;
 
-	const FVector SpawnLoc = GetActorLocation()
-		+ GetActorForwardVector() * 80.0f
-		+ FVector(0, 0, -40.0f);
-	OldWeapon->PlaceInWorld(SpawnLoc);
+		const FVector DropLoc = GetActorLocation()
+			+ GetActorForwardVector() * 80.0f
+			+ FVector(0, 0, -40.0f);
+		OldWeapon->PlaceInWorld(DropLoc);
 
-	EquipWeapon(Weapon, Slot);
+		// Null the old slot so EquipWeapon does not touch the dropped weapon.
+		if (Slot == 0)
+			PrimaryWeapon = nullptr;
+		else
+			SecondaryWeapon = nullptr;
+
+		EquipWeapon(Weapon, Slot);
+		return;
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1170,14 +1138,22 @@ AFPSWeapon* AFPSCharacter::GetWeaponPickupTarget() const
 	if (!InteractionManager)
 		return nullptr;
 
+	auto IsValidTarget = [](AFPSWeapon* W) { return W && W->IsOnGround(); };
+
 	AActor* Active = InteractionManager->GetActiveTarget();
 	if (Active && InteractionManager->GetActiveType() == EFPSInteractionType::WeaponPickup)
-		return Cast<AFPSWeapon>(Active);
+	{
+		if (AFPSWeapon* W = Cast<AFPSWeapon>(Active); IsValidTarget(W))
+			return W;
+	}
 
 	for (const FFPSInteractionEntry& E : InteractionManager->GetEntries())
 	{
 		if (E.Type == EFPSInteractionType::WeaponPickup)
-			return Cast<AFPSWeapon>(E.Source);
+		{
+			if (AFPSWeapon* W = Cast<AFPSWeapon>(E.Source); IsValidTarget(W))
+				return W;
+		}
 	}
 
 	return nullptr;
