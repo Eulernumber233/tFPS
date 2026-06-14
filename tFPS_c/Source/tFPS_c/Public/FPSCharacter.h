@@ -69,6 +69,17 @@ struct FHoTState
 /** HoT buff 状态变化 —— HUD 订阅显示/更新/隐藏 buff 独立进度条。 */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnHoTChanged, bool, bActive, float, RemainingDuration, float, MaxDuration);
 
+// ---- 武器系统信号（蓝图 UI 订阅） ----
+
+/** 拾取武器到槽位（空槽放入时触发）。 */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnWeaponPickedUp, AFPSWeapon*, Weapon, int32, Slot);
+
+/** 交换武器（丢弃手持 + 拾取新武器放同槽时触发）。 */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnWeaponSwapped, AFPSWeapon*, OldWeapon, AFPSWeapon*, NewWeapon);
+
+/** 切换活跃槽位（按 1/2 键时触发）。 */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnWeaponSlotSwitched, int32, NewSlot);
+
 UENUM(BlueprintType)
 enum class EFPSMovementState : uint8
 {
@@ -440,6 +451,20 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Buff")
 	FOnHoTChanged OnHoTChanged;
 
+	// ---- 武器系统信号 ----
+
+	/** 拾取武器到空槽位时广播（Pick Up）。 */
+	UPROPERTY(BlueprintAssignable, Category = "Weapon")
+	FOnWeaponPickedUp OnWeaponPickedUp;
+
+	/** 交换武器时广播（丢弃手持 + 新武器放入同槽，Swap）。 */
+	UPROPERTY(BlueprintAssignable, Category = "Weapon")
+	FOnWeaponSwapped OnWeaponSwapped;
+
+	/** 切换活跃槽位时广播（Switch）。 */
+	UPROPERTY(BlueprintAssignable, Category = "Weapon")
+	FOnWeaponSlotSwitched OnWeaponSlotSwitched;
+
 	/** 武器在每端收到 MulticastHitConfirmed 后调用攻击者角色的此函数，本地判断角色身份后分发三种事件。
 	 *  纯本地表现，不做任何权威逻辑。Victim 为命中的角色（命中环境时为 nullptr）。 */
 	void DispatchHitFX(const FVector& ImpactPoint, const FVector& ImpactNormal,
@@ -603,9 +628,6 @@ protected:
 	uint8 bWantsToRun : 1;
 	uint8 bWantsToAim : 1;
 	uint8 bWantsToFire : 1;
-
-	/** 防止 OnRep 冗余触发导致 OnPrimaryWeaponEquipped 重复调用 */
-	bool bWeaponEquipped = false;
 
 	/** 奔跑打断开火后，松开 Shift 时若 LMB 仍按住是否恢复开火 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon")
@@ -799,6 +821,9 @@ protected:
 
 	/** 服务端：将指定武器作为 Pickup 掉落在角色脚下（死亡/交换时调用）。 */
 	void DropWeaponAsPickup(AFPSWeapon* Weapon);
+
+	/** 根据 ActiveWeaponSlot 刷新两把武器的 Show/Hide。服务端直接调，客户端 OnRep 调。 */
+	void UpdateWeaponVisibility();
 
 	// ---- 道具使用状态机（仅服务端，不复制） ----
 

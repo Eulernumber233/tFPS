@@ -43,6 +43,7 @@ void AFPSWeapon::BeginPlay()
 
 	if (bStartAsGroundItem && HasAuthority())
 	{
+		ServerResetAmmo();
 		bIsOnGround = true;
 		PickupSphere->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 		PickupSphere->SetGenerateOverlapEvents(true);
@@ -81,6 +82,15 @@ bool AFPSWeapon::IsNetRelevantFor(const AActor* RealViewer, const AActor* ViewTa
 	return Super::IsNetRelevantFor(RealViewer, ViewTarget, SrcLocation);
 }
 
+EWeaponState AFPSWeapon::GetWeaponState() const
+{
+	if (bIsOnGround)
+		return EWeaponState::Dropped;
+	if (OwningCharacter && OwningCharacter->GetActiveWeapon() == this)
+		return EWeaponState::Active;
+	return EWeaponState::Holstered;
+}
+
 // ===================================================================
 // Pickup / Drop
 // ===================================================================
@@ -91,6 +101,8 @@ void AFPSWeapon::PlaceInWorld(const FVector& Location)
 		return;
 
 	DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
+	SetActorScale3D(FVector::OneVector);
+	SetActorRotation(FRotator::ZeroRotator);
 	SetOwner(nullptr);
 	OwningCharacter = nullptr;
 	SetActorLocation(Location);
@@ -444,6 +456,13 @@ void AFPSWeapon::OnRep_IsOnGround()
 	{
 		PickupSphere->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 		PickupSphere->SetGenerateOverlapEvents(true);
+
+		// 延迟一帧复位缩放，确保脱离 Arm 的复制已处理完毕
+		// （此时 SetActorScale3D 设的是相对缩放，脱离后会变成错误值）
+		GetWorld()->GetTimerManager().SetTimerForNextTick([this]()
+		{
+			SetActorScale3D(FVector::OneVector);
+		});
 	}
 	else
 	{

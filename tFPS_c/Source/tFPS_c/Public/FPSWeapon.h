@@ -8,8 +8,17 @@ class AFPSCharacter;
 class UFPSAmmoItemDef;
 class USphereComponent;
 
-/** 弹药变化事件：弹夹数 / 备弹总数（背包中同口径子弹合计）。每端本机广播（服务端权威值复制后触发）。 */
-// DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnAmmoChanged, int32, CurrentAmmo, int32, ReserveAmmo);
+/** 武器状态：推导值，不存字段。
+ *  Dropped   = bIsOnGround==true（在地上可被拾取）
+ *  Holstered = 在槽位中但不是当前手持（visible=false）
+ *  Active    = 在当前活跃槽位，手中持有 */
+UENUM(BlueprintType)
+enum class EWeaponState : uint8
+{
+	Dropped   UMETA(DisplayName = "掉落中"),
+	Holstered UMETA(DisplayName = "挂载中"),
+	Active    UMETA(DisplayName = "手持中")
+};
 
 UCLASS()
 class TFPS_C_API AFPSWeapon : public AActor
@@ -105,6 +114,10 @@ public:
 	/** 武器是否在地上（可被拾取），Replicated。 */
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Pickup")
 	bool IsOnGround() const { return bIsOnGround; }
+
+	/** 当前武器状态（蓝图可读）。从 bIsOnGround + Owner 的活跃武器推导。 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon")
+	EWeaponState GetWeaponState() const;
 
 	/** 拾取范围半径。 */
 	float GetPickupRadius() const { return PickupRadius; }

@@ -50,19 +50,52 @@ bool UFPSInventoryComponent::ServerAddEntry(const FInventoryEntry& InEntry)
 
 	UFPSItemDef* Def = InEntry.ItemDef;
 
-	// 可堆叠道具：先尝试并入现有同类未满格子。
+	// 可堆叠道具：先尝试并入现有同类未满格子，多格分摊直至耗尽或无可并入格。
 	if (!Def->bUsesDurability)
 	{
+		int32 Remaining = InEntry.Count;
 		for (FInventoryEntry& Entry : Items)
 		{
 			if (Entry.ItemDef == Def && Entry.Count < Def->MaxStack)
 			{
 				const int32 Space = Def->MaxStack - Entry.Count;
-				const int32 Added = FMath::Min(Space, InEntry.Count);
+				const int32 Added = FMath::Min(Space, Remaining);
 				Entry.Count += Added;
-				OnRep_Items();   // 服务端本机手动刷（host 不走复制）
-				return true;
+				Remaining -= Added;
+				if (Remaining <= 0)
+				{
+					OnRep_Items();
+					return true;   // 全部分摊完毕
+				}
 			}
+		}
+
+		// 有剩余且需要开新格 → 把剩余数量写回临时 Entry，继续走下面的"新建一格"逻辑
+		if (Remaining > 0 && Remaining < InEntry.Count)
+		{
+			FInventoryEntry RemainderEntry = InEntry;
+			RemainderEntry.Count = Remaining;
+
+			int32 SlotX = -1, SlotY = -1;
+			if (!FindSlotFor(Def, SlotX, SlotY))
+			{
+				// 开不了新格：至少已并入了一部分，通知 UI 刷新（已部分合并）
+				OnRep_Items();
+				return false;
+			}
+
+			RemainderEntry.GridX = SlotX;
+			RemainderEntry.GridY = SlotY;
+			Items.Add(RemainderEntry);
+			OnRep_Items();
+			return true;
+		}
+
+		// Remaining == InEntry.Count（没有任何现成格可并入）→ 走下面的新建一格逻辑
+		if (Remaining <= 0)
+		{
+			OnRep_Items();
+			return true;
 		}
 	}
 

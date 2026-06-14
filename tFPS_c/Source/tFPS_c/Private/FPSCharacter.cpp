@@ -29,7 +29,6 @@ AFPSCharacter::AFPSCharacter()
 	bIsDead = false;
 	bWantsToRun = false;
 	bWantsToAim = false;
-	bWeaponEquipped = false;
 
 	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
 	{
@@ -64,25 +63,26 @@ void AFPSCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// Weapons are only spawned on the server.
+	// 服务端生成默认主武器（延迟一帧调蓝图事件，等蓝图组件就绪）
 	if (HasAuthority() && WeaponClass && !PrimaryWeapon)
 	{
-		PrimaryWeapon = GetWorld()->SpawnActorDeferred<AFPSWeapon>(WeaponClass, FTransform::Identity, this, this);
-		if (PrimaryWeapon)
+		AFPSWeapon* W = GetWorld()->SpawnActorDeferred<AFPSWeapon>(WeaponClass, FTransform::Identity, this, this);
+		if (W)
 		{
-			PrimaryWeapon->SetOwningCharacter(this);
-			PrimaryWeapon->FinishSpawning(FTransform::Identity);
-			PrimaryWeapon->ServerResetAmmo();
+			W->SetOwningCharacter(this);
+			W->FinishSpawning(FTransform::Identity);
+			W->ServerResetAmmo();
+			PrimaryWeapon = W;
 		}
 
 		if (PrimaryWeapon)
 		{
 			GetWorld()->GetTimerManager().SetTimerForNextTick([this]()
 			{
-				if (PrimaryWeapon && !bWeaponEquipped)
+				if (PrimaryWeapon)
 				{
-					bWeaponEquipped = true;
 					OnPrimaryWeaponEquipped();
+					UpdateWeaponVisibility();
 				}
 			});
 		}
@@ -223,12 +223,6 @@ void AFPSCharacter::Die(AController* Killer)
 	CancelItemUse();
 	DeactivateHoT();
 
-	// Stop fire and drop all weapons on ground.
-	if (PrimaryWeapon)
-		PrimaryWeapon->StopFire();
-	if (SecondaryWeapon)
-		SecondaryWeapon->StopFire();
-
 	GetCharacterMovement()->DisableMovement();
 
 	SetDeathPresentation(true);
@@ -240,18 +234,21 @@ void AFPSCharacter::Die(AController* Killer)
 	if (AFPSPlayerState* VPS = GetPlayerState<AFPSPlayerState>())
 		VPS->AddDeath();
 
-	const FVector SpawnLoc = GetActorLocation()
+	// 掉落所有武器到死亡位置
+	const FVector DropLoc = GetActorLocation()
 		+ GetActorForwardVector() * 80.0f
 		+ FVector(0, 0, -40.0f);
 
 	if (PrimaryWeapon)
 	{
-		PrimaryWeapon->PlaceInWorld(SpawnLoc);
+		PrimaryWeapon->StopFire();
+		PrimaryWeapon->PlaceInWorld(DropLoc);
 		PrimaryWeapon = nullptr;
 	}
 	if (SecondaryWeapon)
 	{
-		SecondaryWeapon->PlaceInWorld(SpawnLoc + GetActorRightVector() * 50.0f);
+		SecondaryWeapon->StopFire();
+		SecondaryWeapon->PlaceInWorld(DropLoc + GetActorRightVector() * 50.0f);
 		SecondaryWeapon = nullptr;
 	}
 
@@ -269,6 +266,14 @@ void AFPSCharacter::DropWeaponAsPickup(AFPSWeapon* Weapon)
 		+ FVector(0, 0, -40.0f);
 
 	Weapon->PlaceInWorld(SpawnLoc);
+}
+
+void AFPSCharacter::UpdateWeaponVisibility()
+{
+	if (PrimaryWeapon)
+		PrimaryWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 0);
+	if (SecondaryWeapon)
+		SecondaryWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 1);
 }
 
 void AFPSCharacter::Respawn(const FVector& SpawnLocation, const FRotator& SpawnRotation)
@@ -293,20 +298,24 @@ void AFPSCharacter::Respawn(const FVector& SpawnLocation, const FRotator& SpawnR
 	Stamina = MaxStamina;
 	OnStaminaChanged.Broadcast(Stamina, MaxStamina);
 
-	// Always spawn a fresh default weapon on respawn.
-	if (WeaponClass)
+	// 生成新默认武器并装备为主武器（延迟一帧调蓝图事件，等蓝图组件就绪）
+	if (WeaponClass && !PrimaryWeapon)
 	{
-		PrimaryWeapon = GetWorld()->SpawnActorDeferred<AFPSWeapon>(WeaponClass, FTransform::Identity, this, this);
-		if (PrimaryWeapon)
+		AFPSWeapon* W = GetWorld()->SpawnActorDeferred<AFPSWeapon>(WeaponClass, FTransform::Identity, this, this);
+		if (W)
 		{
-			PrimaryWeapon->SetOwningCharacter(this);
-			PrimaryWeapon->FinishSpawning(FTransform::Identity);
-			PrimaryWeapon->ServerResetAmmo();
+			W->SetOwningCharacter(this);
+			W->FinishSpawning(FTransform::Identity);
+			W->ServerResetAmmo();
+			PrimaryWeapon = W;
 
 			GetWorld()->GetTimerManager().SetTimerForNextTick([this]()
 			{
 				if (PrimaryWeapon)
+				{
 					OnPrimaryWeaponEquipped();
+					UpdateWeaponVisibility();
+				}
 			});
 		}
 	}
@@ -327,6 +336,7 @@ void AFPSCharacter::SetDeathPresentation(bool bDead)
 	if (USkeletalMeshComponent* MeshComp = GetMesh())
 		MeshComp->SetVisibility(!bDead, /*bPropagateToChildren=*/true);
 
+	// 死亡时隐藏所有武器（死亡后武器会被 PlaceInWorld 重新显示）
 	if (PrimaryWeapon)
 		PrimaryWeapon->SetActorHiddenInGame(bDead);
 
@@ -343,10 +353,10 @@ void AFPSCharacter::OnRep_Health(float OldHealth)
 
 void AFPSCharacter::OnRep_PrimaryWeapon(AFPSWeapon* OldWeapon)
 {
-	if (PrimaryWeapon && !bWeaponEquipped)
+	if (PrimaryWeapon)
 	{
-		bWeaponEquipped = true;
 		OnPrimaryWeaponEquipped();
+		OnWeaponPickedUp.Broadcast(PrimaryWeapon, 0);
 	}
 }
 
@@ -354,17 +364,16 @@ void AFPSCharacter::OnRep_SecondaryWeapon(AFPSWeapon* OldWeapon)
 {
 	if (SecondaryWeapon)
 	{
-		SecondaryWeapon->SetActorHiddenInGame(true);
 		OnSecondaryWeaponEquipped();
+		UpdateWeaponVisibility();
+		OnWeaponPickedUp.Broadcast(SecondaryWeapon, 1);
 	}
 }
 
 void AFPSCharacter::OnRep_ActiveWeaponSlot()
 {
-	if (PrimaryWeapon)
-		PrimaryWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 0);
-	if (SecondaryWeapon)
-		SecondaryWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 1);
+	UpdateWeaponVisibility();
+	OnWeaponSlotSwitched.Broadcast(ActiveWeaponSlot);
 }
 
 void AFPSCharacter::OnRep_bIsDead()
@@ -707,23 +716,15 @@ void AFPSCharacter::SwitchWeapon(int32 NewSlot)
 
 void AFPSCharacter::SwitchToPrimaryWeapon()
 {
-	if (!IsLocallyControlled())
+	if (!IsLocallyControlled() || !PrimaryWeapon || ActiveWeaponSlot == 0)
 		return;
-
-	if (!SecondaryWeapon || ActiveWeaponSlot == 0)
-		return;
-
 	SwitchWeapon(0);
 }
 
 void AFPSCharacter::SwitchToSecondaryWeapon()
 {
-	if (!IsLocallyControlled())
+	if (!IsLocallyControlled() || !SecondaryWeapon || ActiveWeaponSlot == 1)
 		return;
-
-	if (!SecondaryWeapon || ActiveWeaponSlot == 1)
-		return;
-
 	SwitchWeapon(1);
 }
 
@@ -732,23 +733,15 @@ void AFPSCharacter::ServerSwitchWeapon_Implementation(int32 NewSlot)
 	if (!HasAuthority() || NewSlot < 0 || NewSlot > 1 || NewSlot == ActiveWeaponSlot)
 		return;
 
-	AFPSWeapon* NewWeapon = GetWeaponInSlot(NewSlot);
-	if (!NewWeapon)
+	if (!GetWeaponInSlot(NewSlot))
 		return;
 
-	// Stop old weapon fire.
-	AFPSWeapon* OldWeapon = GetActiveWeapon();
-	if (OldWeapon)
+	if (AFPSWeapon* OldWeapon = GetActiveWeapon())
 		OldWeapon->StopFire();
 
-	// Switch slot. Visibility updates on all clients via OnRep_ActiveWeaponSlot.
 	ActiveWeaponSlot = NewSlot;
-
-	// Server host manually toggles visibility.
-	if (PrimaryWeapon)
-		PrimaryWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 0);
-	if (SecondaryWeapon)
-		SecondaryWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 1);
+	UpdateWeaponVisibility();
+	OnWeaponSlotSwitched.Broadcast(NewSlot);
 }
 
 void AFPSCharacter::EquipWeapon(AFPSWeapon* Weapon, int32 Slot)
@@ -758,27 +751,20 @@ void AFPSCharacter::EquipWeapon(AFPSWeapon* Weapon, int32 Slot)
 
 	Weapon->RemoveFromWorld();
 	Weapon->SetOwningCharacter(this);
-	Weapon->ServerResetAmmo();
 
 	if (Slot == 0)
-	{
 		PrimaryWeapon = Weapon;
-	}
 	else
-	{
 		SecondaryWeapon = Weapon;
-	}
 
-	// Set visibility based on active slot.
-	if (PrimaryWeapon)
-		PrimaryWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 0);
-	if (SecondaryWeapon)
-		SecondaryWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 1);
+	UpdateWeaponVisibility();
 
 	if (Slot == 0)
 		OnPrimaryWeaponEquipped();
 	else
 		OnSecondaryWeaponEquipped();
+
+	OnWeaponPickedUp.Broadcast(Weapon, Slot);
 }
 
 // ---------------------------------------------------------------------------
@@ -815,14 +801,14 @@ void AFPSCharacter::ServerTryPickupWeapon_Implementation()
 	if (Dist > Weapon->GetPickupRadius() + 50.0f)
 		return;
 
-	// 0 guns: equip as primary.
+	// 0 把枪 → 拾取为主武器
 	if (!PrimaryWeapon && !SecondaryWeapon)
 	{
 		EquipWeapon(Weapon, 0);
 		return;
 	}
 
-	// 1 gun: equip to free slot.
+	// 1 把枪 → 拾取到空槽位（不切活跃武器）
 	if (!PrimaryWeapon)
 	{
 		EquipWeapon(Weapon, 0);
@@ -834,24 +820,13 @@ void AFPSCharacter::ServerTryPickupWeapon_Implementation()
 		return;
 	}
 
-	// 2 guns: swap with active weapon - drop old, equip new.
+	// 2 把枪 → 交换：丢弃当前手持，新武器放入同槽
 	{
 		AFPSWeapon* OldWeapon = GetActiveWeapon();
 		const int32 Slot = ActiveWeaponSlot;
-
-		const FVector DropLoc = GetActorLocation()
-			+ GetActorForwardVector() * 80.0f
-			+ FVector(0, 0, -40.0f);
-		OldWeapon->PlaceInWorld(DropLoc);
-
-		// Null the old slot so EquipWeapon does not touch the dropped weapon.
-		if (Slot == 0)
-			PrimaryWeapon = nullptr;
-		else
-			SecondaryWeapon = nullptr;
-
+		DropWeaponAsPickup(OldWeapon);
 		EquipWeapon(Weapon, Slot);
-		return;
+		OnWeaponSwapped.Broadcast(OldWeapon, Weapon);
 	}
 }
 
