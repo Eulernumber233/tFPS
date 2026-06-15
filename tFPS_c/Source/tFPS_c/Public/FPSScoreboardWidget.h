@@ -103,6 +103,17 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Scoreboard")
 	void OnRowsUpdated();
 
+	/** Whether this scoreboard is in PostGame mode (persistent, with exit button). */
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Scoreboard")
+	bool IsPostGameMode() const { return bIsPostGame; }
+
+	/** Set PostGame mode (shows exit button, disables Tab hide). */
+	void SetPostGameMode(bool bPostGame);
+
+	/** Called when player clicks "Exit" in PostGame scoreboard. Relay to Controller RPC. */
+	UFUNCTION(BlueprintCallable, Category = "Scoreboard")
+	void OnExitClicked();
+
 protected:
 	virtual void NativeConstruct() override;
 
@@ -117,6 +128,10 @@ protected:
 	/** 已排序的行快照。 */
 	UPROPERTY(BlueprintReadOnly, Category = "Scoreboard")
 	TArray<FScoreboardRow> SortedRows;
+
+	/** PostGame mode: persistent display, exit button visible. */
+	UPROPERTY(BlueprintReadOnly, Category = "Scoreboard")
+	bool bIsPostGame = false;
 
 private:
 	/** 排序比较：按当前 SortKey 取值，bDescending 决定方向；同值用 Kills 兜底再用名字稳定排序。 */

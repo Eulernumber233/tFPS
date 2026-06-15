@@ -3,13 +3,15 @@
 #include "FPSPlayerState.h"
 #include "FPSCharacter.h"
 #include "FPSPlayerController.h"
+#include "FPSWeapon.h"
+#include "FPSPickup.h"
+#include "FPSInventoryComponent.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerStart.h"
 #include "EngineUtils.h"
 
 AFPSGameMode::AFPSGameMode()
 {
-	// Wire up default classes — overridable via Blueprint child
 	GameStateClass = AFPSGameState::StaticClass();
 	PlayerStateClass = AFPSPlayerState::StaticClass();
 	PlayerControllerClass = AFPSPlayerController::StaticClass();
@@ -19,101 +21,152 @@ AFPSGameMode::AFPSGameMode()
 void AFPSGameMode::BeginPlay()
 {
 	Super::BeginPlay();
-
-	// Warmup period, then start the match
-	FTimerHandle StartTimerHandle;
-	GetWorldTimerManager().SetTimer(StartTimerHandle,
-		FTimerDelegate::CreateUObject(this, &AFPSGameMode::StartMatch), 3.0f, false);
-}
-
-void AFPSGameMode::PostLogin(APlayerController* NewPlayer)
-{
-	Super::PostLogin(NewPlayer);
-
-	// 分配默认名 client1/client2/...（计分板显示用）。后续登录系统可用
-	// APlayerState::SetPlayerName 覆盖。++PlayerJoinCount 从 1 起算。
-	if (NewPlayer)
-	{
-		if (APlayerState* PS = NewPlayer->PlayerState)
-		{
-			const FString DefaultName = FString::Printf(TEXT("client%d"), ++PlayerJoinCount);
-			PS->SetPlayerName(DefaultName);
-		}
-	}
+	TransitionToPhase(EMatchStage::Preparation);
 }
 
 void AFPSGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	GetWorldTimerManager().ClearTimer(OneSecondTimerHandle);
-	GetWorldTimerManager().ClearTimer(MatchEndTimerHandle);
+	GetWorldTimerManager().ClearTimer(JoinGraceTimerHandle);
+	GetWorldTimerManager().ClearTimer(PostGameTimerHandle);
 	Super::EndPlay(EndPlayReason);
 }
 
-// ---------------------------------------------------------------------------
-// Match flow
-// ---------------------------------------------------------------------------
+// ============================================================================
+// Phase State Machine
+// ============================================================================
 
-void AFPSGameMode::StartMatch()
+void AFPSGameMode::TransitionToPhase(EMatchStage NewPhase)
 {
 	AFPSGameState* GS = GetGameState<AFPSGameState>();
-	if (GS)
+	if (!GS) return;
+
+	// Clear all phase-specific timers
+	GetWorldTimerManager().ClearTimer(OneSecondTimerHandle);
+	GetWorldTimerManager().ClearTimer(JoinGraceTimerHandle);
+	GetWorldTimerManager().ClearTimer(PostGameTimerHandle);
+
+	GS->MatchStage = NewPhase;
+	GS->OnRep_MatchStage(); // fire on server (listen server host needs manual broadcast)
+
+	UE_LOG(LogTemp, Log, TEXT("[GameMode] Phase → %d, ActivePlayers=%d"),
+		(int32)NewPhase, GetActivePlayerCount());
+
+	switch (NewPhase)
 	{
-		GS->MatchStage = EMatchStage::Playing;
-		GS->TimeRemaining = MatchDuration;
-	}
-
-	// One-second countdown tick
-	GetWorldTimerManager().SetTimer(OneSecondTimerHandle,
-		FTimerDelegate::CreateUObject(this, &AFPSGameMode::UpdateTimer), 1.0f, true);
-
-	// End match after MatchDuration seconds
-	GetWorldTimerManager().SetTimer(MatchEndTimerHandle,
-		FTimerDelegate::CreateUObject(this, &AFPSGameMode::EndMatch), MatchDuration, false);
-
-	// Respawn any players who were waiting in the warmup
-	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
-	{
-		APlayerController* PC = It->Get();
-		if (PC && PC->GetPawn() == nullptr)
-		{
-			RestartPlayer(PC);
-		}
+	case EMatchStage::Preparation: EnterPreparation(); break;
+	case EMatchStage::Countdown:   EnterCountdown();   break;
+	case EMatchStage::Playing:     EnterPlaying();     break;
+	case EMatchStage::PostGame:    EnterPostGame();    break;
 	}
 }
 
-void AFPSGameMode::EndMatch()
+void AFPSGameMode::EnterPreparation()
 {
-	GetWorldTimerManager().ClearTimer(OneSecondTimerHandle);
-	GetWorldTimerManager().ClearTimer(MatchEndTimerHandle);
-
 	AFPSGameState* GS = GetGameState<AFPSGameState>();
-	if (GS)
+	if (!GS) return;
+
+	GS->TimeRemaining = -1.0f;
+	GS->CountdownSeconds = 0;
+	PlayersClickedExit = 0;
+	bJoinGraceActive = false;
+
+	// Enable input for all players (in case coming from PostGame)
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
 	{
-		GS->MatchStage = EMatchStage::Ended;
-		GS->TimeRemaining = 0.0f;
+		if (APlayerController* PC = It->Get())
+		{
+			PC->SetIgnoreMoveInput(false);
+			PC->SetIgnoreLookInput(false);
+		}
 	}
 
-	// Determine the winner
+	UE_LOG(LogTemp, Log, TEXT("[GameMode] Preparation — waiting for %d+ players"), MinPlayersToStart);
+}
+
+void AFPSGameMode::EnterCountdown()
+{
+	AFPSGameState* GS = GetGameState<AFPSGameState>();
+	if (!GS) return;
+
+	GS->CountdownSeconds = FMath::CeilToInt(CountdownDuration);
+	GS->TimeRemaining = CountdownDuration;
+	GS->OnRep_CountdownSeconds(); // fire on server
+
+	// 1-second tick for countdown
+	GetWorldTimerManager().SetTimer(OneSecondTimerHandle,
+		FTimerDelegate::CreateUObject(this, &AFPSGameMode::PhaseOneSecondTick), 1.0f, true);
+
+	UE_LOG(LogTemp, Log, TEXT("[GameMode] Countdown — %d seconds"), GS->CountdownSeconds);
+}
+
+void AFPSGameMode::EnterPlaying()
+{
+	AFPSGameState* GS = GetGameState<AFPSGameState>();
+	if (!GS) return;
+
+	// Clear all player inventories, reset stats, give default weapons
+	ClearAllInventoriesAndStats();
+
+	GS->TimeRemaining = PlayingDuration;
+	GS->CountdownSeconds = 0;
+
+	// 1-second tick for Playing timer
+	GetWorldTimerManager().SetTimer(OneSecondTimerHandle,
+		FTimerDelegate::CreateUObject(this, &AFPSGameMode::PhaseOneSecondTick), 1.0f, true);
+
+	// Join grace period: new players can join for the first N seconds
+	bJoinGraceActive = true;
+	GetWorldTimerManager().SetTimer(JoinGraceTimerHandle, [this]()
+	{
+		bJoinGraceActive = false;
+		UE_LOG(LogTemp, Log, TEXT("[GameMode] Join grace period ended"));
+	}, JoinGracePeriod, false);
+
+	UE_LOG(LogTemp, Log, TEXT("[GameMode] Playing — %d seconds, join grace=%d seconds"),
+		(int32)PlayingDuration, (int32)JoinGracePeriod);
+}
+
+void AFPSGameMode::EnterPostGame()
+{
+	AFPSGameState* GS = GetGameState<AFPSGameState>();
+	if (!GS) return;
+
+	GS->TimeRemaining = PostGameDuration;
+	PlayersClickedExit = 0;
+	bJoinGraceActive = false;
+
+	// Determine winner
 	AFPSPlayerState* Best = nullptr;
 	int32 BestKills = -1;
-
 	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
 	{
 		APlayerController* PC = It->Get();
-		if (PC)
-		{
-			if (AFPSPlayerState* PS = PC->GetPlayerState<AFPSPlayerState>())
-			{
-				if (PS->Kills > BestKills)
-				{
-					BestKills = PS->Kills;
-					Best = PS;
-				}
-			}
+		if (!PC) continue;
 
-			// Disable input for all players
-			PC->SetIgnoreMoveInput(true);
-			PC->SetIgnoreLookInput(true);
+		// Disable input
+		PC->SetIgnoreMoveInput(true);
+		PC->SetIgnoreLookInput(true);
+
+		// Force stop fire/aim on all characters
+		if (AFPSCharacter* Char = Cast<AFPSCharacter>(PC->GetPawn()))
+		{
+			Char->ForceStopFireAndAim();
+		}
+
+		if (AFPSPlayerState* PS = PC->GetPlayerState<AFPSPlayerState>())
+		{
+			if (PS->Kills > BestKills)
+			{
+				BestKills = PS->Kills;
+				Best = PS;
+			}
+		}
+
+		// Notify controller to show post-game scoreboard
+		if (AFPSPlayerController* FPS_PC = Cast<AFPSPlayerController>(PC))
+		{
+			FPS_PC->ClientShowPostGameScoreboard();
 		}
 	}
 
@@ -122,80 +175,450 @@ void AFPSGameMode::EndMatch()
 		UE_LOG(LogTemp, Log, TEXT(">>>>> Match Over! Winner: %s with %d kills <<<<<"),
 			*Best->GetPlayerName(), Best->Kills);
 	}
-	else
+
+	// Auto-transition back to Preparation after PostGameDuration
+	GetWorldTimerManager().SetTimer(PostGameTimerHandle, [this]()
 	{
-		UE_LOG(LogTemp, Log, TEXT(">>>>> Match Over! No winner <<<<<"));
-	}
+		ResetLevelPickups();
+		ResetAllPlayers();
+		TransitionToPhase(EMatchStage::Preparation);
+	}, PostGameDuration, false);
+
+	UE_LOG(LogTemp, Log, TEXT("[GameMode] PostGame — scoreboard shown, cycling in %d seconds"),
+		(int32)PostGameDuration);
 }
 
-void AFPSGameMode::UpdateTimer()
+// ============================================================================
+// 1-second tick
+// ============================================================================
+
+void AFPSGameMode::PhaseOneSecondTick()
 {
 	AFPSGameState* GS = GetGameState<AFPSGameState>();
-	if (GS && GS->MatchStage == EMatchStage::Playing)
+	if (!GS) return;
+
+	switch (GS->MatchStage)
+	{
+	case EMatchStage::Countdown:
+	{
+		GS->CountdownSeconds = FMath::Max(0, GS->CountdownSeconds - 1);
+		GS->TimeRemaining = (float)GS->CountdownSeconds;
+		GS->OnRep_CountdownSeconds();
+
+		if (GS->CountdownSeconds <= 0)
+		{
+			TransitionToPhase(EMatchStage::Playing);
+		}
+		break;
+	}
+
+	case EMatchStage::Playing:
 	{
 		GS->TimeRemaining = FMath::Max(0.0f, GS->TimeRemaining - 1.0f);
+
+		if (GS->TimeRemaining <= 0.0f)
+		{
+			TransitionToPhase(EMatchStage::PostGame);
+		}
+		else if (GetActivePlayerCount() == 0)
+		{
+			// Everyone left — end the match early
+			UE_LOG(LogTemp, Log, TEXT("[GameMode] All players left, ending match early"));
+			TransitionToPhase(EMatchStage::PostGame);
+		}
+		break;
+	}
+
+	default:
+		break;
 	}
 }
 
-// ---------------------------------------------------------------------------
+// ============================================================================
+// Player Join / Leave
+// ============================================================================
+
+void AFPSGameMode::PostLogin(APlayerController* NewPlayer)
+{
+	Super::PostLogin(NewPlayer);
+
+	if (!NewPlayer) return;
+
+	AFPSGameState* GS = GetGameState<AFPSGameState>();
+	if (!GS) return;
+
+	// Assign default name. May be overwritten by OnPlayerIdentityReceived later.
+	APlayerState* PS = NewPlayer->PlayerState;
+	if (PS && PS->GetPlayerName().IsEmpty())
+	{
+		const FString DefaultName = FString::Printf(TEXT("client%d"), ++PlayerJoinCount);
+		PS->SetPlayerName(DefaultName);
+	}
+
+	switch (GS->MatchStage)
+	{
+	case EMatchStage::Preparation:
+	case EMatchStage::Countdown:
+	{
+		// Check max players
+		if (GetActivePlayerCount() > MaxPlayers)
+		{
+			RejectOrSpectatePlayer(NewPlayer, TEXT("Server is full"));
+			return;
+		}
+
+		// Spawn pawn if needed
+		if (NewPlayer->GetPawn() == nullptr)
+		{
+			RestartPlayer(NewPlayer);
+		}
+
+		// If in Preparation and we hit min players, start countdown
+		if (GS->MatchStage == EMatchStage::Preparation && GetActivePlayerCount() >= MinPlayersToStart)
+		{
+			TransitionToPhase(EMatchStage::Countdown);
+		}
+		break;
+	}
+
+	case EMatchStage::Playing:
+	{
+		// Check max players
+		if (GetActivePlayerCount() > MaxPlayers)
+		{
+			RejectOrSpectatePlayer(NewPlayer, TEXT("Server is full"));
+			return;
+		}
+
+		// Check join grace period
+		if (!bJoinGraceActive)
+		{
+			RejectOrSpectatePlayer(NewPlayer, TEXT("Match already started — join period ended"));
+			return;
+		}
+
+		// Spawn and give default gear
+		if (NewPlayer->GetPawn() == nullptr)
+		{
+			RestartPlayer(NewPlayer);
+		}
+		break;
+	}
+
+	case EMatchStage::PostGame:
+	{
+		// Spectate only — match is over, they'll join next round
+		RejectOrSpectatePlayer(NewPlayer, TEXT("Match ended — wait for next round"));
+		break;
+	}
+	}
+}
+
+void AFPSGameMode::Logout(AController* Exiting)
+{
+	Super::Logout(Exiting);
+
+	AFPSGameState* GS = GetGameState<AFPSGameState>();
+	if (!GS) return;
+
+	const int32 ActiveCount = GetActivePlayerCount(); // after Super::Logout, this player is already removed
+
+	switch (GS->MatchStage)
+	{
+	case EMatchStage::Countdown:
+	{
+		// If player count drops below min, abort countdown
+		if (ActiveCount < MinPlayersToStart)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[GameMode] Player left during Countdown, back to Preparation"));
+			TransitionToPhase(EMatchStage::Preparation);
+		}
+		break;
+	}
+
+	case EMatchStage::Playing:
+	{
+		if (ActiveCount == 0)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[GameMode] All players left during Playing, ending match"));
+			TransitionToPhase(EMatchStage::PostGame);
+		}
+		break;
+	}
+
+	case EMatchStage::PostGame:
+	{
+		// Track exits — if all remaining players click exit, skip timer
+		PlayersClickedExit++;
+		if (ActiveCount == 0 || PlayersClickedExit >= ActiveCount)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[GameMode] All players exited PostGame, cycling now"));
+			ResetLevelPickups();
+			ResetAllPlayers();
+			TransitionToPhase(EMatchStage::Preparation);
+		}
+		break;
+	}
+
+	default:
+		break;
+	}
+}
+
+void AFPSGameMode::OnPlayerClickedExit(APlayerController* PC)
+{
+	if (!PC) return;
+
+	AFPSGameState* GS = GetGameState<AFPSGameState>();
+	if (!GS || GS->MatchStage != EMatchStage::PostGame) return;
+
+	PlayersClickedExit++;
+
+	const int32 ActiveCount = GetActivePlayerCount();
+	if (PlayersClickedExit >= ActiveCount)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[GameMode] All players clicked exit, cycling immediately"));
+		GetWorldTimerManager().ClearTimer(PostGameTimerHandle);
+		ResetLevelPickups();
+		ResetAllPlayers();
+		TransitionToPhase(EMatchStage::Preparation);
+	}
+}
+
+// ============================================================================
+// Player Identity
+// ============================================================================
+
+void AFPSGameMode::OnPlayerIdentityReceived(APlayerController* PC, const FString& DesiredName)
+{
+	if (!PC || DesiredName.IsEmpty()) return;
+
+	APlayerState* PS = PC->PlayerState;
+	if (!PS) return;
+
+	// Check for duplicate names and append suffix if needed
+	FString FinalName = DesiredName;
+	AFPSGameState* GS = GetGameState<AFPSGameState>();
+
+	if (GS)
+	{
+		int32 Suffix = 1;
+		bool bDuplicate = true;
+		FString Candidate = FinalName;
+
+		while (bDuplicate)
+		{
+			bDuplicate = false;
+			for (APlayerState* Other : GS->PlayerArray)
+			{
+				if (Other && Other != PS && Other->GetPlayerName() == Candidate)
+				{
+					bDuplicate = true;
+					Candidate = FString::Printf(TEXT("%s%d"), *DesiredName, ++Suffix);
+					break;
+				}
+			}
+		}
+		FinalName = Candidate;
+	}
+
+	PS->SetPlayerName(FinalName);
+	UE_LOG(LogTemp, Log, TEXT("[GameMode] Player identity: '%s' → '%s'"), *DesiredName, *FinalName);
+}
+
+// ============================================================================
 // Death & Respawn
-// ---------------------------------------------------------------------------
+// ============================================================================
 
 void AFPSGameMode::OnPlayerDied(AController* Victim, AController* Killer)
 {
-	if (!Victim)
-		return;
+	if (!Victim) return;
 
-	// Notify the client that death happened (plays UI / sound)
+	AFPSGameState* GS = GetGameState<AFPSGameState>();
+	if (!GS) return;
+
+	// Only count kills/deaths during Playing phase
+	if (GS->MatchStage == EMatchStage::Playing)
+	{
+		if (Killer && Killer != Victim)
+		{
+			if (AFPSPlayerState* KillerPS = Killer->GetPlayerState<AFPSPlayerState>())
+			{
+				KillerPS->AddKill(1);
+			}
+		}
+
+		if (AFPSPlayerState* VictimPS = Victim->GetPlayerState<AFPSPlayerState>())
+		{
+			VictimPS->AddDeath(1);
+		}
+	}
+
+	// Notify client
 	if (AFPSPlayerController* PC = Cast<AFPSPlayerController>(Victim))
 	{
 		PC->ClientRespawn();
 	}
 
-	// 复活延迟从角色身上读取（蓝图可调，留参数），死亡相机在这段时间播放。
+	// Respawn delay: short in preparation/countdown, normal in playing
 	float RespawnDelay = 2.0f;
-	if (AFPSCharacter* Char = Cast<AFPSCharacter>(Victim->GetPawn()))
+	if (GS->MatchStage == EMatchStage::Preparation || GS->MatchStage == EMatchStage::Countdown)
+	{
+		RespawnDelay = 1.0f;
+	}
+	else if (AFPSCharacter* Char = Cast<AFPSCharacter>(Victim->GetPawn()))
+	{
 		RespawnDelay = Char->GetRespawnDelay();
+	}
 
-	// Schedule respawn after the delay. 不销毁 Pawn —— 沿用同一个角色，复活时传送复位。
-	FTimerHandle RespawnTimerHandle;
-	GetWorldTimerManager().SetTimer(RespawnTimerHandle,
+	// Don't respawn in PostGame
+	if (GS->MatchStage == EMatchStage::PostGame)
+		return;
+
+	FTimerHandle TimerHandle;
+	GetWorldTimerManager().SetTimer(TimerHandle,
 		FTimerDelegate::CreateLambda([this, Victim]() { RespawnPlayer(Victim); }),
 		RespawnDelay, false);
 }
 
 void AFPSGameMode::RespawnPlayer(AController* Player)
 {
-	// Don't respawn if match ended while the timer was ticking
 	AFPSGameState* GS = GetGameState<AFPSGameState>();
-	if (GS && GS->MatchStage != EMatchStage::Playing)
+	if (!GS) return;
+
+	// Don't respawn in PostGame
+	if (GS->MatchStage == EMatchStage::PostGame)
 		return;
 
-	if (!IsValid(Player))
-		return;
+	if (!IsValid(Player)) return;
 
 	AFPSCharacter* Char = Cast<AFPSCharacter>(Player->GetPawn());
 	if (!Char)
 	{
-		// 没有 Pawn（例如热身阶段从未生成过）—— 退回标准生成。
 		RestartPlayer(Player);
 		return;
 	}
 
-	// 选随机出生点，把现有 Pawn 传送过去并复位（不销毁重建）。
 	AActor* Start = ChoosePlayerStart(Player);
 	const FVector Loc = Start ? Start->GetActorLocation() : Char->GetActorLocation();
 	const FRotator Rot = Start ? Start->GetActorRotation() : Char->GetActorRotation();
 	Char->Respawn(Loc, Rot);
 }
 
-// ---------------------------------------------------------------------------
+// ============================================================================
+// Inventory / Stats Clearing on Playing Start
+// ============================================================================
+
+void AFPSGameMode::ClearAllInventoriesAndStats()
+{
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		APlayerController* PC = It->Get();
+		if (!PC) continue;
+
+		// Reset player stats
+		if (AFPSPlayerState* PS = PC->GetPlayerState<AFPSPlayerState>())
+		{
+			PS->ResetStats();
+		}
+
+		AFPSCharacter* Char = Cast<AFPSCharacter>(PC->GetPawn());
+		if (!Char) continue;
+
+		// Clear inventory
+		if (UFPSInventoryComponent* Inv = Char->GetInventory())
+		{
+			Inv->ServerClear();
+		}
+
+		// Destroy old weapons
+		if (AFPSWeapon* Primary = Char->GetPrimaryWeapon())
+		{
+			Primary->Destroy();
+		}
+		if (AFPSWeapon* Secondary = Char->GetSecondaryWeapon())
+		{
+			Secondary->Destroy();
+		}
+
+		// Spawn default weapon and equip (same logic as Character::BeginPlay)
+		Char->ResetLoadout();
+	}
+
+	// Reset all player positions
+	ResetAllPlayers();
+}
+
+void AFPSGameMode::ResetAllPlayers()
+{
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		APlayerController* PC = It->Get();
+		if (!PC) continue;
+
+		if (AFPSCharacter* Char = Cast<AFPSCharacter>(PC->GetPawn()))
+		{
+			AActor* Start = ChoosePlayerStart(PC);
+			if (Start)
+			{
+				Char->SetActorLocation(Start->GetActorLocation());
+				Char->SetActorRotation(Start->GetActorRotation());
+			}
+			Char->ServerApplyHeal(Char->GetMaxHealth()); // full heal
+		}
+	}
+}
+
+void AFPSGameMode::ResetLevelPickups()
+{
+	// Destroy all pickups on the map
+	for (TActorIterator<AFPSPickup> It(GetWorld()); It; ++It)
+	{
+		if (*It) (*It)->Destroy();
+	}
+
+	// Destroy all dropped weapons (IsOnGround weapons)
+	for (TActorIterator<AFPSWeapon> It(GetWorld()); It; ++It)
+	{
+		if (*It && (*It)->IsOnGround())
+		{
+			(*It)->Destroy();
+		}
+	}
+}
+
+// ============================================================================
+// Utilities
+// ============================================================================
+
+int32 AFPSGameMode::GetActivePlayerCount() const
+{
+	int32 Count = 0;
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		if (It->Get() && !It->Get()->PlayerState->IsOnlyASpectator())
+		{
+			Count++;
+		}
+	}
+	return Count;
+}
+
+void AFPSGameMode::RejectOrSpectatePlayer(APlayerController* PC, const FString& Reason)
+{
+	UE_LOG(LogTemp, Warning, TEXT("[GameMode] Rejecting/spectating player: %s"), *Reason);
+
+	// Make them a spectator — they'll join next round
+	PC->ChangeState(NAME_Spectating);
+	PC->ClientGotoState(NAME_Spectating);
+}
+
+// ============================================================================
 // Player Start selection
-// ---------------------------------------------------------------------------
+// ============================================================================
 
 AActor* AFPSGameMode::ChoosePlayerStart_Implementation(AController* Player)
 {
-	// Gather all player starts
 	TArray<APlayerStart*> Starts;
 	for (TActorIterator<APlayerStart> It(GetWorld()); It; ++It)
 	{
@@ -226,7 +649,6 @@ AActor* AFPSGameMode::ChoosePlayerStart_Implementation(AController* Player)
 		}
 	}
 
-	// Pick from free starts if any, otherwise any start
 	TArray<APlayerStart*>& Pool = FreeStarts.Num() > 0 ? FreeStarts : Starts;
 	return Pool[FMath::RandRange(0, Pool.Num() - 1)];
 }

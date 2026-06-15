@@ -11,14 +11,18 @@ void AFPSGameState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLif
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	DOREPLIFETIME_CONDITION(AFPSGameState, MatchStage, COND_None);
 	DOREPLIFETIME_CONDITION(AFPSGameState, TimeRemaining, COND_None);
+	DOREPLIFETIME_CONDITION(AFPSGameState, CountdownSeconds, COND_None);
 }
 
 void AFPSGameState::OnRep_MatchStage()
 {
-	// Client-side match UI hook
+	OnMatchStageChanged.Broadcast(MatchStage);
 }
 
 void AFPSGameState::OnRep_TimeRemaining()
 {
-	// Client-side timer UI hook
+}
+
+void AFPSGameState::OnRep_CountdownSeconds()
+{
 }

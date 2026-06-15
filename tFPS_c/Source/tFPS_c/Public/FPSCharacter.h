@@ -158,6 +158,9 @@ public:
 	 *  由 GameMode 在死亡延迟结束后调用（也可被其它复活逻辑复用）。public 供 GameMode 访问。 */
 	void Respawn(const FVector& SpawnLocation, const FRotator& SpawnRotation);
 
+	/** 服务端: 销毁旧武器+生成新默认武器（Playing 开始时 GameMode 调用）。 */
+	void ResetLoadout();
+
 	UFUNCTION(BlueprintCallable, Category = "Weapon")
 	AFPSWeapon* GetPrimaryWeapon() const { return PrimaryWeapon; }
 
@@ -686,6 +689,10 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
 	UInputAction* InputCycleInteraction = nullptr;
 
+	/** ESC 键：打开/关闭游戏内菜单。 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
+	UInputAction* InputGameMenu = nullptr;
+
 	// ---- 背包系统 ----
 
 	/** 背包组件（构造时创建，服务端权威，复制给本人）。 */
@@ -717,6 +724,9 @@ protected:
 
 	/** E 键处理：翻转 bInventoryOpen 并触发蓝图 OnToggleInventory（纯本地 UI）。 */
 	void ToggleInventory();
+
+	/** ESC 键处理：打开/关闭游戏内菜单（把逻辑委托给 PlayerController）。 */
+	void ToggleInGameMenu();
 
 	/**
 	 * 客户端请求拾取（不传 Pickup 指针 —— Actor 引用跨 Server RPC 在客户端常解析失败）。

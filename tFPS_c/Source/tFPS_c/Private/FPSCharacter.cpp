@@ -475,6 +475,11 @@ void AFPSCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompon
 	{
 		EIC->BindAction(InputCycleInteraction, ETriggerEvent::Triggered, this, &AFPSCharacter::CycleInteractionInput);
 	}
+
+	if (InputGameMenu)
+	{
+		EIC->BindAction(InputGameMenu, ETriggerEvent::Started, this, &AFPSCharacter::ToggleInGameMenu);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1325,6 +1330,57 @@ void AFPSCharacter::CloseInventory()
 		return;
 
 	ToggleInventory();
+}
+
+void AFPSCharacter::ToggleInGameMenu()
+{
+	if (!IsLocallyControlled())
+		return;
+
+	AFPSPlayerController* PC = Cast<AFPSPlayerController>(GetController());
+	if (!PC) return;
+
+	if (PC->IsInGameMenuOpen())
+		PC->HideInGameMenu();
+	else
+		PC->ShowInGameMenu();
+}
+
+void AFPSCharacter::ResetLoadout()
+{
+	if (!HasAuthority())
+		return;
+
+	// Destroy old weapons
+	if (PrimaryWeapon)
+	{
+		PrimaryWeapon->Destroy();
+		PrimaryWeapon = nullptr;
+	}
+	if (SecondaryWeapon)
+	{
+		SecondaryWeapon->Destroy();
+		SecondaryWeapon = nullptr;
+	}
+
+	// Spawn new default primary weapon
+	if (WeaponClass)
+	{
+		AFPSWeapon* W = GetWorld()->SpawnActorDeferred<AFPSWeapon>(WeaponClass, FTransform::Identity, this, this);
+		if (W)
+		{
+			W->SetOwningCharacter(this);
+			W->FinishSpawning(FTransform::Identity);
+			W->ServerResetAmmo();
+			PrimaryWeapon = W;
+			ActiveWeaponSlot = 0;
+			W->SetActorHiddenInGame(false);
+		}
+	}
+
+	// Notify blueprint (clients via OnRep)
+	OnRep_PrimaryWeapon(nullptr);
+	OnRep_SecondaryWeapon(nullptr);
 }
 
 void AFPSCharacter::ServerTryPickup_Implementation()

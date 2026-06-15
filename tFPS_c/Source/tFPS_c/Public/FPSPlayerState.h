@@ -13,6 +13,9 @@ class TFPS_C_API AFPSPlayerState : public APlayerState
 public:
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
+	/** Reset all stats to zero (server only, called when a new Playing phase begins). */
+	void ResetStats();
+
 	/** Add kills to this player's score (server only) */
 	UFUNCTION(BlueprintCallable, Category = "Score")
 	void AddKill(int32 Amount = 1);

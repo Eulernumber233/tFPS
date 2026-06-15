@@ -1,5 +1,8 @@
+#if !UE_SERVER
+
 #include "FPSScoreboardWidget.h"
 #include "FPSPlayerState.h"
+#include "FPSPlayerController.h"
 #include "FPSGameState.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/PlayerState.h"
@@ -117,3 +120,18 @@ void UFPSScoreboardWidget::RefreshRows()
 	// 通知 WBP 重画表格。
 	OnRowsUpdated();
 }
+
+void UFPSScoreboardWidget::SetPostGameMode(bool bPostGame)
+{
+	bIsPostGame = bPostGame;
+}
+
+void UFPSScoreboardWidget::OnExitClicked()
+{
+	if (AFPSPlayerController* PC = Cast<AFPSPlayerController>(GetOwningPlayer()))
+	{
+		PC->ServerNotifyExitClicked();
+	}
+}
+
+#endif // !UE_SERVER

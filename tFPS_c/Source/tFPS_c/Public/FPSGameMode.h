@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/GameMode.h"
+#include "FPSGameState.h"
 #include "FPSGameMode.generated.h"
 
 UCLASS()
@@ -15,35 +16,92 @@ public:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
-	/** 玩家登入：分配默认名 client1/client2/...（计分板/UI 用，后续登录系统可覆盖）。 */
+	/** Player login: assign default name, handle phase transitions, max-player / join-grace checks. */
 	virtual void PostLogin(APlayerController* NewPlayer) override;
 
-	/** Called by AFPSCharacter::Die — schedules a 3-second respawn */
+	/** Player logout: track player count and phase transitions (back to Preparation if count < min). */
+	virtual void Logout(AController* Exiting) override;
+
+	/** Called by AFPSCharacter::Die — phase-aware: only counts kills/deaths in Playing. */
 	void OnPlayerDied(AController* Victim, AController* Killer);
 
+	/** Post-game: player clicked "Exit" on the scoreboard. When all exit, skip to Preparation. */
+	void OnPlayerClickedExit(APlayerController* PC);
+
+	/** Server receives desired player name from client (via RPC relay from PlayerController). */
+	void OnPlayerIdentityReceived(APlayerController* PC, const FString& DesiredName);
+
 protected:
-	/** Match length in seconds (default 5 minutes) */
-	UPROPERTY(EditDefaultsOnly, Category = "Match")
-	float MatchDuration = 300.0f;
+	// ---- Phase configuration (EditDefaultsOnly, overridable via Blueprint) ----
 
-	/** Begin the playing phase */
-	void StartMatch();
+	UPROPERTY(EditDefaultsOnly, Category = "Match|Phases")
+	int32 MinPlayersToStart = 2;
 
-	/** End the match and declare a winner */
-	void EndMatch();
+	UPROPERTY(EditDefaultsOnly, Category = "Match|Phases")
+	float CountdownDuration = 5.0f;
 
-	/** Decrement the match timer every second */
-	void UpdateTimer();
+	UPROPERTY(EditDefaultsOnly, Category = "Match|Phases")
+	float PlayingDuration = 300.0f;
 
-	/** Respawn a specific player */
+	/** Seconds after Playing starts during which new players can still join. */
+	UPROPERTY(EditDefaultsOnly, Category = "Match|Phases")
+	float JoinGracePeriod = 60.0f;
+
+	/** Maximum players in the match. New connections beyond this are rejected or spectate. */
+	UPROPERTY(EditDefaultsOnly, Category = "Match|Phases")
+	int32 MaxPlayers = 5;
+
+	/** Seconds to show post-game scoreboard before auto-cycling to Preparation. */
+	UPROPERTY(EditDefaultsOnly, Category = "Match|Phases")
+	float PostGameDuration = 15.0f;
+
+	// ---- Phase state machine ----
+
+	/** Master phase transition. Clears phase timers, sets GS->MatchStage, dispatches to enter function. */
+	void TransitionToPhase(EMatchStage NewPhase);
+
+	void EnterPreparation();
+	void EnterCountdown();
+	void EnterPlaying();
+	void EnterPostGame();
+
+	/** 1-second tick during Playing and Countdown phases. */
+	void PhaseOneSecondTick();
+
+	/** Respawn a specific player (only valid in Preparation/Countdown/Playing). */
 	void RespawnPlayer(AController* Player);
 
-	/** Pick a random unoccupied player start */
+	/** Pick a random unoccupied player start. */
 	virtual AActor* ChoosePlayerStart_Implementation(AController* Player) override;
 
-	FTimerHandle MatchEndTimerHandle;
-	FTimerHandle OneSecondTimerHandle;
+	/** Clear all players' inventories, reset K/D/damage, give default weapons, teleport to spawns. */
+	void ClearAllInventoriesAndStats();
 
-	/** 已登入玩家计数，用于生成 client1/client2/... 默认名（服务端）。 */
+	/** Destroy all pickups / weapon pickups / dropped items on the map (for PostGame cleanup). */
+	void ResetLevelPickups();
+
+	/** Count active (non-spectator) players. */
+	int32 GetActivePlayerCount() const;
+
+	/** Kick or spectate a player who cannot join the current phase. */
+	void RejectOrSpectatePlayer(APlayerController* PC, const FString& Reason);
+
+	/** Teleport all players to random PlayerStarts and reset their state. */
+	void ResetAllPlayers();
+
+	// ---- Timers ----
+
+	FTimerHandle OneSecondTimerHandle;
+	FTimerHandle JoinGraceTimerHandle;
+	FTimerHandle PostGameTimerHandle;
+	FTimerHandle RespawnTimerHandle; // kept per-death via lambda, not stored phase-wide
+
+	/** Join grace period active (new players can join during Playing). */
+	bool bJoinGraceActive = false;
+
+	/** Post-game: count of players who clicked exit. */
+	int32 PlayersClickedExit = 0;
+
+	/** Count of logged-in players, for default name generation. */
 	int32 PlayerJoinCount = 0;
 };

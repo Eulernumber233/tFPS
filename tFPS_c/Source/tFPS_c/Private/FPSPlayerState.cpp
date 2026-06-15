@@ -1,6 +1,21 @@
 #include "FPSPlayerState.h"
 #include "Net/UnrealNetwork.h"
 
+void AFPSPlayerState::ResetStats()
+{
+	if (!HasAuthority())
+		return;
+
+	Kills = 0;
+	Deaths = 0;
+	TotalDamage = 0.0f;
+	CarryValue = 0.0f;
+	OnRep_Kills();
+	OnRep_Deaths();
+	OnRep_TotalDamage();
+	OnRep_CarryValue();
+}
+
 void AFPSPlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
