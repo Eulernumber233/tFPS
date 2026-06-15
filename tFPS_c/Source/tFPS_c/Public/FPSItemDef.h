@@ -82,6 +82,25 @@ struct FInventoryEntry
 	UPROPERTY(BlueprintReadOnly, Category = "Inventory")
 	int32 GridY = -1;
 
+	/**
+	 * 道具 Slot 在 CanvasPanel 中的像素 X 位置（由 RecalculateSlotPositions 填充，WBP 直接读）。
+	 * 不参与网络复制（客户端本地独立计算，结果一致）。
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "Inventory|Layout", meta = (SkipForCompression))
+	float SlotPixelX = 0.0f;
+
+	/** 道具 Slot 在 CanvasPanel 中的像素 Y 位置。 */
+	UPROPERTY(BlueprintReadOnly, Category = "Inventory|Layout")
+	float SlotPixelY = 0.0f;
+
+	/** 道具 Slot 的像素宽度（= ItemDef->GridWidth × CellWidth）。MVP 全为 CellWidth。 */
+	UPROPERTY(BlueprintReadOnly, Category = "Inventory|Layout")
+	float SlotPixelWidth = 0.0f;
+
+	/** 道具 Slot 的像素高度（= ItemDef->GridHeight × CellHeight）。MVP 全为 CellHeight。 */
+	UPROPERTY(BlueprintReadOnly, Category = "Inventory|Layout")
+	float SlotPixelHeight = 0.0f;
+
 	bool IsValidEntry() const { return ItemDef != nullptr; }
 };
 

@@ -214,6 +214,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Inventory")
 	void DropInventoryItem(int32 Index);
 
+	/**
+	 * 拖拽移动背包道具（本地调用 → 服务端权威重排）。
+	 * WBP 拖拽释放后调这个。FromIndex=被拖拽道具索引，ToGridX/ToGridY=吸附到的网格坐标。
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Inventory")
+	void MoveInventoryItem(int32 FromIndex, int32 ToGridX, int32 ToGridY);
+
 	/** 设置当前可拾取目标（Pickup 进入范围时调用，纯本地，给蓝图显示"按F"提示）。 */
 	void SetPickupTarget(AFPSPickup* Pickup);
 
@@ -725,6 +732,10 @@ protected:
 	/** 客户端请求丢弃背包道具 → 服务端权威执行（移除 + 脚下生成 Pickup）。 */
 	UFUNCTION(Server, Reliable)
 	void ServerDropInventoryItem(int32 Index);
+
+	/** 客户端请求拖动重排背包道具 → 服务端权威执行。 */
+	UFUNCTION(Server, Reliable)
+	void ServerMoveInventoryItem(int32 FromIndex, int32 ToGridX, int32 ToGridY);
 
 	/** Server-side death handling */
 	void Die(AController* Killer);

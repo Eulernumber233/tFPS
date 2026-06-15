@@ -1263,6 +1263,17 @@ void AFPSCharacter::ServerDropInventoryItem_Implementation(int32 Index)
 		Inventory->ServerDropItem(Index);
 }
 
+void AFPSCharacter::MoveInventoryItem(int32 FromIndex, int32 ToGridX, int32 ToGridY)
+{
+	ServerMoveInventoryItem(FromIndex, ToGridX, ToGridY);
+}
+
+void AFPSCharacter::ServerMoveInventoryItem_Implementation(int32 FromIndex, int32 ToGridX, int32 ToGridY)
+{
+	if (Inventory)
+		Inventory->ServerMoveItem(FromIndex, ToGridX, ToGridY);
+}
+
 void AFPSCharacter::ForceStopFireAndAim()
 {
 	if (!IsLocallyControlled())

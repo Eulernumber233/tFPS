@@ -103,6 +103,17 @@ public:
 	void ServerClear();
 
 	/**
+	 * 服务端：拖拽移动道具（背包内重新排序 / 改变位置）。
+	 * 计数模式下按 (ToGridX, ToGridY) 映射到数组索引重排；
+	 * 占格模式（未来）下检查目标区域是否为空并设 GridX/GridY。
+	 * @param FromIndex 被拖拽道具在 Items 中的索引
+	 * @param ToGridX  释放时吸附到的网格列坐标
+	 * @param ToGridY  释放时吸附到的网格行坐标
+	 * @return 是否成功移动（越界/无效坐标返回 false）
+	 */
+	bool ServerMoveItem(int32 FromIndex, int32 ToGridX, int32 ToGridY);
+
+	/**
 	 * 服务端：从背包消耗指定口径的子弹（换弹时 Weapon 调用）。
 	 * 遍历背包中所有匹配 Caliber 的 UFPSAmmoItemDef 条目，按条目顺序逐格取弹。
 	 * @param Caliber 需要的口径
@@ -116,6 +127,18 @@ public:
 
 	/** 手动触发背包复制刷新（Listen Server host 不走复制，武器换弹后需调此刷新 UI）。 */
 	void MarkItemsDirty();
+
+	/** 重新计算所有 Items 的 SlotPixelX/Y/Width/Height（Items 变化后自动调用，WBP 直接读）。 */
+	UFUNCTION(BlueprintCallable, Category = "Inventory|Layout")
+	void RecalculateSlotPositions();
+
+	/** 背包网格总像素宽度（= GridOriginX + GridColumns × CellWidth），WBP 设 CanvasPanel 尺寸用。 */
+	UFUNCTION(BlueprintCallable, Category = "Inventory|Layout")
+	float GetTotalPixelWidth() const { return GridOriginX + GridColumns * CellWidth; }
+
+	/** 背包网格总像素高度（= GridOriginY + GridRows × CellHeight）。 */
+	UFUNCTION(BlueprintCallable, Category = "Inventory|Layout")
+	float GetTotalPixelHeight() const { return GridOriginY + GridRows * CellHeight; }
 
 	// ---- 蓝图/UI 读取 ----
 
@@ -150,6 +173,24 @@ protected:
 	/** 背包网格行数（蓝图可调，MVP 默认 3 → 3×5=15 格）。 */
 	UPROPERTY(EditDefaultsOnly, Category = "Inventory")
 	int32 GridRows = 3;
+
+	// ---- 像素布局配置（蓝图填，C++ 据此计算每个 Entry 的 SlotPixelX/Y/Width/Height） ----
+
+	/** 单个格子的像素宽度（WBP 里预设的格大小）。 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventory|Layout")
+	float CellWidth = 64.0f;
+
+	/** 单个格子的像素高度。 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventory|Layout")
+	float CellHeight = 64.0f;
+
+	/** 网格左上角在 CanvasPanel 中的 X 像素偏移（留边距用）。 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventory|Layout")
+	float GridOriginX = 0.0f;
+
+	/** 网格左上角在 CanvasPanel 中的 Y 像素偏移。 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventory|Layout")
+	float GridOriginY = 0.0f;
 
 	/**
 	 * 放置策略（升级到塔科夫式占格背包的唯一替换点）。

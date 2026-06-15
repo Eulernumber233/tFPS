@@ -240,6 +240,36 @@ void UFPSInventoryComponent::ServerClear()
 	OnRep_Items();
 }
 
+bool UFPSInventoryComponent::ServerMoveItem(int32 FromIndex, int32 ToGridX, int32 ToGridY)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+		return false;
+	if (!Items.IsValidIndex(FromIndex))
+		return false;
+	if (ToGridX < 0 || ToGridY < 0 || ToGridX >= GridColumns || ToGridY >= GridRows)
+		return false;
+
+	// ---- 计数模式（当前）：按 (Col, Row) 映射到数组插入位置，重排 Items ----
+	// 升级到占格模式时，换成：检查目标矩形是否为空（跳过 FromIndex），
+	// 是则设 Entry.GridX/Y 为目标坐标并删旧 GridX/Y，否则返回 false。
+
+	int32 InsertPos = ToGridY * GridColumns + ToGridX;
+	InsertPos = FMath::Clamp(InsertPos, 0, Items.Num());
+
+	if (InsertPos == FromIndex)
+		return false;
+
+	FInventoryEntry Moved = Items[FromIndex];
+	Items.RemoveAt(FromIndex);
+
+	if (FromIndex < InsertPos)
+		InsertPos--;
+
+	Items.Insert(Moved, InsertPos);
+	OnRep_Items();
+	return true;
+}
+
 int32 UFPSInventoryComponent::ConsumeAmmo(FName Caliber, int32 Amount, UFPSAmmoItemDef*& OutLastDef,
 	TArray<FWeaponAmmoEntry>* OutBreakdown)
 {
@@ -287,8 +317,41 @@ void UFPSInventoryComponent::MarkItemsDirty()
 	OnRep_Items();
 }
 
+void UFPSInventoryComponent::RecalculateSlotPositions()
+{
+	const int32 Cols = FMath::Max(GridColumns, 1);
+
+	for (int32 i = 0; i < Items.Num(); ++i)
+	{
+		FInventoryEntry& Entry = Items[i];
+		if (!Entry.IsValidEntry())
+			continue;
+
+		const int32 W = Entry.ItemDef->GridWidth;
+		const int32 H = Entry.ItemDef->GridHeight;
+
+		// 计算像素位置：
+		//   GridX/GridY >= 0 → 塔科夫式占格定位（未来 FindSlotFor 回填真实坐标时生效）
+		//   否则（当前计数模式）→ 按数组索引顺序铺格，与旧 UniformGridPanel 行为一致
+		if (Entry.GridX >= 0 && Entry.GridY >= 0)
+		{
+			Entry.SlotPixelX = GridOriginX + Entry.GridX * CellWidth;
+			Entry.SlotPixelY = GridOriginY + Entry.GridY * CellHeight;
+		}
+		else
+		{
+			Entry.SlotPixelX = GridOriginX + (i % Cols) * CellWidth;
+			Entry.SlotPixelY = GridOriginY + (i / Cols) * CellHeight;
+		}
+
+		Entry.SlotPixelWidth  = W * CellWidth;
+		Entry.SlotPixelHeight = H * CellHeight;
+	}
+}
+
 void UFPSInventoryComponent::OnRep_Items()
 {
-	// 服务端本机直接调（手动），客户端收到 Items 复制后自动调 → 统一广播给 UI。
+	// 每次 Items 变化后重新计算像素布局 → 广播给 UI（WBP 直接读 SlotPixelX/Y/Width/Height）。
+	RecalculateSlotPositions();
 	OnInventoryChanged.Broadcast();
 }
