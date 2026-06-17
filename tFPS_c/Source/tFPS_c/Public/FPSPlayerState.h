@@ -54,6 +54,10 @@ public:
 	UFUNCTION()
 	void OnRep_CarryValue();
 
+	/** Called on clients when IconIndex replicates */
+	UFUNCTION()
+	void OnRep_IconIndex();
+
 	UPROPERTY(ReplicatedUsing = OnRep_Kills, BlueprintReadOnly, Category = "Score")
 	int32 Kills = 0;
 
@@ -72,9 +76,15 @@ public:
 	float CarryValue = 0.0f;
 
 	/**
-	 * 玩家头像（预留字段，复制）。未来登录界面设置头像后从那里赋值。
-	 * 用 TSoftObjectPtr 避免计分板未打开时也强引用加载所有玩家头像。当前为空。
+	 * 玩家头像。TSoftObjectPtr 避免计分板强制加载所有头像。
 	 */
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Score")
 	TSoftObjectPtr<UTexture2D> PlayerIcon;
+
+	/**
+	 * 头像索引（0-4）。客户端主菜单选完后通过 RPC 发给服务端，复制到所有端。
+	 * 计分板 WBP 根据此索引从本地纹理数组取对应贴图。
+	 */
+	UPROPERTY(ReplicatedUsing = OnRep_IconIndex, BlueprintReadOnly, Category = "Score")
+	int32 IconIndex = 0;
 };

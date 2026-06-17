@@ -32,6 +32,10 @@ public:
 	UFUNCTION(Server, Reliable)
 	void ServerSetPlayerIdentity(const FString& DesiredName);
 
+	/** Client→Server RPC: send selected avatar icon index (0-5). */
+	UFUNCTION(Server, Reliable)
+	void ServerSetPlayerIcon(int32 IconIndex);
+
 	/** Whether scoreboard is currently open (Tab held). */
 	UFUNCTION(BlueprintCallable, Category = "Scoreboard")
 	bool IsScoreboardOpen() const { return bScoreboardOpen; }

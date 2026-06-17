@@ -247,12 +247,20 @@ void AFPSGameMode::PostLogin(APlayerController* NewPlayer)
 	AFPSGameState* GS = GetGameState<AFPSGameState>();
 	if (!GS) return;
 
-	// Assign default name. May be overwritten by OnPlayerIdentityReceived later.
-	APlayerState* PS = NewPlayer->PlayerState;
-	if (PS && PS->GetPlayerName().IsEmpty())
+	// Always assign short default name (overwrite system username).
+	// May be overwritten later by OnPlayerIdentityReceived (from main menu input).
+	if (APlayerState* PS = NewPlayer->PlayerState)
 	{
-		const FString DefaultName = FString::Printf(TEXT("client%d"), ++PlayerJoinCount);
-		PS->SetPlayerName(DefaultName);
+		static const TCHAR Charset[] = TEXT("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789");
+		constexpr int32 CharsetLen = UE_ARRAY_COUNT(Charset) - 1;
+		const int32 Length = FMath::RandRange(7, 10);
+		FString RandomName;
+		RandomName.Reserve(Length);
+		for (int32 i = 0; i < Length; ++i)
+		{
+			RandomName.AppendChar(Charset[FMath::RandRange(0, CharsetLen - 1)]);
+		}
+		PS->SetPlayerName(RandomName);
 	}
 
 	switch (GS->MatchStage)
@@ -426,6 +434,16 @@ void AFPSGameMode::OnPlayerIdentityReceived(APlayerController* PC, const FString
 	UE_LOG(LogTemp, Log, TEXT("[GameMode] Player identity: '%s' → '%s'"), *DesiredName, *FinalName);
 }
 
+void AFPSGameMode::OnPlayerIconReceived(APlayerController* PC, int32 InIconIndex)
+{
+	if (!PC || !HasAuthority()) return;
+
+	AFPSPlayerState* PS = PC->GetPlayerState<AFPSPlayerState>();
+	if (!PS) return;
+
+	PS->IconIndex = FMath::Clamp(InIconIndex, 0, 5);
+}
+
 // ============================================================================
 // Death & Respawn
 // ============================================================================
@@ -531,17 +549,7 @@ void AFPSGameMode::ClearAllInventoriesAndStats()
 			Inv->ServerClear();
 		}
 
-		// Destroy old weapons
-		if (AFPSWeapon* Primary = Char->GetPrimaryWeapon())
-		{
-			Primary->Destroy();
-		}
-		if (AFPSWeapon* Secondary = Char->GetSecondaryWeapon())
-		{
-			Secondary->Destroy();
-		}
-
-		// Spawn default weapon and equip (same logic as Character::BeginPlay)
+		// ResetLoadout() destroys old weapons, spawns new default, resets ammo, sets slot=0
 		Char->ResetLoadout();
 	}
 

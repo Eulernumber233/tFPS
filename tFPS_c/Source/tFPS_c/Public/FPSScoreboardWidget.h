@@ -50,6 +50,10 @@ struct FScoreboardRow
 	/** 是否本地玩家（WBP 可据此高亮自己那一行）。 */
 	UPROPERTY(BlueprintReadOnly, Category = "Scoreboard")
 	bool bIsLocalPlayer = false;
+
+	/** 头像索引（0-4），WBP 据此从本地纹理数组选贴图。 */
+	UPROPERTY(BlueprintReadOnly, Category = "Scoreboard")
+	int32 IconIndex = 0;
 };
 
 /**

@@ -14,10 +14,11 @@ void UFPSMainMenuWidget::HostGame(int32 Port)
 	}
 }
 
-void UFPSMainMenuWidget::JoinGame(const FString& Address)
+void UFPSMainMenuWidget::JoinGame(const FString& IP, int32 Port)
 {
 	if (UFPSGameInstance* GI = Cast<UFPSGameInstance>(GetGameInstance()))
 	{
+		const FString Address = FString::Printf(TEXT("%s:%d"), *IP, Port);
 		GI->JoinGame(Address);
 	}
 }

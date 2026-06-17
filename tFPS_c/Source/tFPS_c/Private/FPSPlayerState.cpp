@@ -10,10 +10,12 @@ void AFPSPlayerState::ResetStats()
 	Deaths = 0;
 	TotalDamage = 0.0f;
 	CarryValue = 0.0f;
+	IconIndex = 0;
 	OnRep_Kills();
 	OnRep_Deaths();
 	OnRep_TotalDamage();
 	OnRep_CarryValue();
+	OnRep_IconIndex();
 }
 
 void AFPSPlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -24,6 +26,7 @@ void AFPSPlayerState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutL
 	DOREPLIFETIME_CONDITION(AFPSPlayerState, TotalDamage, COND_None);
 	DOREPLIFETIME_CONDITION(AFPSPlayerState, CarryValue, COND_None);
 	DOREPLIFETIME_CONDITION(AFPSPlayerState, PlayerIcon, COND_None);
+	DOREPLIFETIME_CONDITION(AFPSPlayerState, IconIndex, COND_None);
 }
 
 void AFPSPlayerState::AddKill(int32 Amount)
@@ -76,4 +79,9 @@ void AFPSPlayerState::OnRep_TotalDamage()
 void AFPSPlayerState::OnRep_CarryValue()
 {
 	// Client-side UI update hook
+}
+
+void AFPSPlayerState::OnRep_IconIndex()
+{
+	// Client-side UI update hook — 计分板行刷新头像时用
 }

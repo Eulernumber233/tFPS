@@ -107,6 +107,7 @@ void UFPSScoreboardWidget::RefreshRows()
 		Row.Deaths        = FPS->Deaths;
 		Row.TotalDamage   = FPS->TotalDamage;
 		Row.CarryValue    = FPS->CarryValue;
+		Row.IconIndex     = FPS->IconIndex;
 		Row.bIsLocalPlayer = (FPS == LocalPS);
 
 		SortedRows.Add(Row);

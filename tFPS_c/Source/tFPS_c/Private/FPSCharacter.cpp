@@ -1,6 +1,7 @@
 #include "FPSCharacter.h"
 #include "FPSWeapon.h"
 #include "FPSGameMode.h"
+#include "FPSGameState.h"
 #include "FPSPlayerState.h"
 #include "FPSInventoryComponent.h"
 #include "FPSInteractionComponent.h"
@@ -195,13 +196,22 @@ float AFPSCharacter::TakeDamage(float Damage, FDamageEvent const& DamageEvent,
 	if (!HasAuthority() || bIsDead || Health <= 0.0f)
 		return 0.0f;
 
+	const float HealthBeforeDamage = Health;
 	float ActualDamage = Super::TakeDamage(Damage, DamageEvent, EventInstigator, DamageCauser);
-	Health = FMath::Clamp(Health - ActualDamage, 0.0f, MaxHealth);
+	Health = FMath::Clamp(HealthBeforeDamage - ActualDamage, 0.0f, MaxHealth);
+	const float EffectiveDamage = HealthBeforeDamage - Health;
 
-	if (ActualDamage > 0.0f && EventInstigator && EventInstigator != GetController())
+	if (EffectiveDamage > 0.0f && EventInstigator && EventInstigator != GetController())
 	{
+		// Only record damage during Playing phase (same as kills/deaths).
 		if (AFPSPlayerState* AttackerPS = EventInstigator->GetPlayerState<AFPSPlayerState>())
-			AttackerPS->AddDamage(ActualDamage);
+		{
+			if (const AFPSGameState* GS = GetWorld()->GetGameState<AFPSGameState>())
+			{
+				if (GS->MatchStage == EMatchStage::Playing)
+					AttackerPS->AddDamage(EffectiveDamage);
+			}
+		}
 	}
 
 	OnHealthChanged.Broadcast(Health, MaxHealth);
@@ -227,12 +237,6 @@ void AFPSCharacter::Die(AController* Killer)
 
 	SetDeathPresentation(true);
 	OnDeathStart();
-
-	if (AFPSPlayerState* KPS = Killer ? Killer->GetPlayerState<AFPSPlayerState>() : nullptr)
-		KPS->AddKill();
-
-	if (AFPSPlayerState* VPS = GetPlayerState<AFPSPlayerState>())
-		VPS->AddDeath();
 
 	// 掉落所有武器到死亡位置
 	const FVector DropLoc = GetActorLocation()

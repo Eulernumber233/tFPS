@@ -17,13 +17,13 @@ class TFPS_C_API UFPSMainMenuWidget : public UUserWidget
 	GENERATED_BODY()
 
 public:
-	/** Host a listen server (Create Room button). Port from input field. */
+	/**  */
 	UFUNCTION(BlueprintCallable, Category = "MainMenu")
 	void HostGame(int32 Port);
 
-	/** Join a server at the given address (IP:Port from input field). */
+	/** Join a server. IP and Port are combined into "IP:Port" internally. */
 	UFUNCTION(BlueprintCallable, Category = "MainMenu")
-	void JoinGame(const FString& Address);
+	void JoinGame(const FString& IP, int32 Port);
 
 	/** Join the default hardcoded server (Join Default Server button). */
 	UFUNCTION(BlueprintCallable, Category = "MainMenu")
@@ -33,7 +33,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "MainMenu")
 	void SavePlayerConfig(const FString& PlayerName, const FString& IconPath);
 
-	/** Load player name and icon path from local config file. Returns true if found. */
+	/** �ӱ��������ļ�����������ƺ�ͼ��·��������ҵ��򷵻�true */
 	UFUNCTION(BlueprintCallable, Category = "MainMenu")
 	bool LoadPlayerConfig(FString& OutPlayerName, FString& OutIconPath);
 
@@ -41,7 +41,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "MainMenu")
 	FString GetDefaultServerAddress() const;
 
-	/** Quit the application. */
+	/** 关闭应用 */
 	UFUNCTION(BlueprintCallable, Category = "MainMenu")
 	void QuitGame();
 };

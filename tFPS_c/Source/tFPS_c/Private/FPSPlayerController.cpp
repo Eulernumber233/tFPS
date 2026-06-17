@@ -83,6 +83,14 @@ void AFPSPlayerController::ServerSetPlayerIdentity_Implementation(const FString&
 	}
 }
 
+void AFPSPlayerController::ServerSetPlayerIcon_Implementation(int32 InIconIndex)
+{
+	if (AFPSGameMode* GM = GetWorld()->GetAuthGameMode<AFPSGameMode>())
+	{
+		GM->OnPlayerIconReceived(this, InIconIndex);
+	}
+}
+
 // ============================================================================
 // BeginPlay / SetupInput / Tick / EndPlay
 // ============================================================================

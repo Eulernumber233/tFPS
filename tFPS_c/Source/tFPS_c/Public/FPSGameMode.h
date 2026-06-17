@@ -31,6 +31,9 @@ public:
 	/** Server receives desired player name from client (via RPC relay from PlayerController). */
 	void OnPlayerIdentityReceived(APlayerController* PC, const FString& DesiredName);
 
+	/** Server receives avatar icon index from client. */
+	void OnPlayerIconReceived(APlayerController* PC, int32 IconIndex);
+
 protected:
 	// ---- Phase configuration (EditDefaultsOnly, overridable via Blueprint) ----
 
@@ -102,6 +105,4 @@ protected:
 	/** Post-game: count of players who clicked exit. */
 	int32 PlayersClickedExit = 0;
 
-	/** Count of logged-in players, for default name generation. */
-	int32 PlayerJoinCount = 0;
 };
