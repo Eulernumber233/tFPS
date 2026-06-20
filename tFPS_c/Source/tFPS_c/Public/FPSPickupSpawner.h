@@ -154,6 +154,18 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Spawn")
 	int32 GetCurrentMaxTier() const;
 
+	// ============================================================
+	//  蓝图事件（BlueprintImplementableEvent）
+	// ============================================================
+
+	/** 生成物品成功时触发（仅服务端，参数为生成的 Pickup）。 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Spawn|Events")
+	void OnSpawnSucceeded(AFPSPickup* SpawnedPickup);
+
+	/** 进入等待生成状态时触发（仅服务端，上一轮 Pickup 已被拾取销毁，开始倒计时下一轮生成）。 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Spawn|Events")
+	void OnWaitingForRespawn();
+
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
@@ -177,6 +189,10 @@ protected:
 	/** 解析条目最终使用的 Pickup 蓝图类（Override → Default → ItemDef::DropPickupClass）。 */
 	TSubclassOf<AFPSPickup> GetPickupClassForEntry(const FSpawnTableEntry& Entry) const;
 
+	/** 当前生成的 Pickup 被销毁时回调（被拾取 / 游戏结束等）。 */
+	UFUNCTION()
+	void OnSpawnedPickupDestroyed(AActor* DestroyedActor);
+
 	/** 编辑器半可视化 — 显示生成点位置与防堆叠径。 */
 	UPROPERTY()
 	TObjectPtr<UBillboardComponent> Billboard;
@@ -189,4 +205,8 @@ protected:
 
 	/** 生成循环是否运行中。 */
 	bool bSpawning = false;
+
+	/** 当前等待被拾取的 Pickup（弱引用，被销毁后自动置空）。 */
+	UPROPERTY()
+	TWeakObjectPtr<AFPSPickup> CurrentSpawnedPickup;
 };

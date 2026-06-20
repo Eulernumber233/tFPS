@@ -14,8 +14,9 @@ AFPSGameMode::AFPSGameMode()
 {
 	GameStateClass = AFPSGameState::StaticClass();
 	PlayerStateClass = AFPSPlayerState::StaticClass();
-	PlayerControllerClass = AFPSPlayerController::StaticClass();
 	DefaultPawnClass = AFPSCharacter::StaticClass();
+
+	// PlayerControllerClass left unset — set via BP subclass or Project Settings.
 }
 
 void AFPSGameMode::BeginPlay()
@@ -71,13 +72,15 @@ void AFPSGameMode::EnterPreparation()
 	PlayersClickedExit = 0;
 	bJoinGraceActive = false;
 
-	// Enable input for all players (in case coming from PostGame)
+	// Reset input for all players (arriving from MainMenu or PostGame)
 	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
 	{
 		if (APlayerController* PC = It->Get())
 		{
 			PC->SetIgnoreMoveInput(false);
 			PC->SetIgnoreLookInput(false);
+			PC->SetInputMode(FInputModeGameOnly());
+			PC->bShowMouseCursor = false;
 		}
 	}
 
@@ -205,6 +208,14 @@ void AFPSGameMode::PhaseOneSecondTick()
 		GS->TimeRemaining = (float)GS->CountdownSeconds;
 		GS->OnRep_CountdownSeconds();
 
+		// 倒计时消息推送
+		if (GS->CountdownSeconds > 0)
+		{
+			AFPSCharacter::BroadcastGameMessage(this,
+				FString::Printf(TEXT("%d 秒后开始"), GS->CountdownSeconds),
+				EFPSMessageWeight::Warning, 1.2f);
+		}
+
 		if (GS->CountdownSeconds <= 0)
 		{
 			TransitionToPhase(EMatchStage::Playing);
@@ -319,6 +330,14 @@ void AFPSGameMode::PostLogin(APlayerController* NewPlayer)
 		RejectOrSpectatePlayer(NewPlayer, TEXT("Match ended — wait for next round"));
 		break;
 	}
+	}
+
+	// 新玩家加入消息广播（非观战者才推送）
+	if (NewPlayer->PlayerState && !NewPlayer->PlayerState->IsOnlyASpectator())
+	{
+		AFPSCharacter::BroadcastGameMessage(this,
+			FString::Printf(TEXT("%s 加入了游戏（当前人数：%d）"), *NewPlayer->PlayerState->GetPlayerName(), GetActivePlayerCount(), *NewPlayer->PlayerState->GetPlayerName()),
+			EFPSMessageWeight::Info, 5.0f);
 	}
 }
 

@@ -40,6 +40,15 @@ bool UFPSInventoryComponent::ServerAddItem(UFPSItemDef* Def)
 		NewEntry.Count = FMath::Min(Def->DefaultValue, Def->MaxStack);
 		NewEntry.Durability = 0;
 	}
+
+	UE_LOG(LogTemp, Log, TEXT("[Inventory] ServerAddItem: %s | class=%s | bUsesDurability=%d | DefaultValue=%d | Durability=%d | Count=%d"),
+		*Def->GetName(),
+		*Def->GetClass()->GetName(),
+		Def->bUsesDurability ? 1 : 0,
+		Def->DefaultValue,
+		NewEntry.Durability,
+		NewEntry.Count);
+
 	return ServerAddEntry(NewEntry);
 }
 

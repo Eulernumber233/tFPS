@@ -41,7 +41,7 @@ protected:
 	int32 MinPlayersToStart = 2;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Match|Phases")
-	float CountdownDuration = 5.0f;
+	float CountdownDuration = 15.0f;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Match|Phases")
 	float PlayingDuration = 300.0f;

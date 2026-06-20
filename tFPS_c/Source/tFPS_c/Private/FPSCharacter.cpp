@@ -258,6 +258,20 @@ void AFPSCharacter::Die(AController* Killer)
 
 	if (AFPSGameMode* GM = Cast<AFPSGameMode>(GetWorld()->GetAuthGameMode()))
 		GM->OnPlayerDied(GetController(), Killer);
+
+	// 击杀消息广播
+	if (Killer && Killer != GetController())
+	{
+		if (AFPSPlayerState* KillerPS = Killer->GetPlayerState<AFPSPlayerState>())
+		{
+			if (AFPSPlayerState* VictimPS = GetPlayerState<AFPSPlayerState>())
+			{
+				BroadcastGameMessage(this, FString::Printf(TEXT("%s 击杀了 %s"),
+					*KillerPS->GetPlayerName(), *VictimPS->GetPlayerName()),
+					EFPSMessageWeight::Critical, 8.0f);
+			}
+		}
+	}
 }
 
 void AFPSCharacter::DropWeaponAsPickup(AFPSWeapon* Weapon)
@@ -278,6 +292,20 @@ void AFPSCharacter::UpdateWeaponVisibility()
 		PrimaryWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 0);
 	if (SecondaryWeapon)
 		SecondaryWeapon->SetActorHiddenInGame(ActiveWeaponSlot != 1);
+}
+
+float AFPSCharacter::GetTimeRemaining() const
+{
+	if (const AFPSGameState* GS = GetWorld()->GetGameState<AFPSGameState>())
+		return GS->TimeRemaining;
+	return -1.0f;
+}
+
+int32 AFPSCharacter::GetCountdownSeconds() const
+{
+	if (const AFPSGameState* GS = GetWorld()->GetGameState<AFPSGameState>())
+		return GS->CountdownSeconds;
+	return 0;
 }
 
 void AFPSCharacter::Respawn(const FVector& SpawnLocation, const FRotator& SpawnRotation)
@@ -477,8 +505,13 @@ void AFPSCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompon
 
 	if (InputCycleInteraction)
 	{
+		// Enhanced Input 路径（作为辅助，某些 BP 配置下可能触发）
+		EIC->BindAction(InputCycleInteraction, ETriggerEvent::Started, this, &AFPSCharacter::CycleInteractionInput);
 		EIC->BindAction(InputCycleInteraction, ETriggerEvent::Triggered, this, &AFPSCharacter::CycleInteractionInput);
 	}
+
+	// 原始 BindAxis 路径（主要路径）：不经过 EI 触发器，直接收鼠标滚轮轴值
+	PlayerInputComponent->BindAxis(FName("MouseWheelAxis"), this, &AFPSCharacter::OnMouseWheelRaw);
 
 	if (InputGameMenu)
 	{
@@ -1088,11 +1121,30 @@ void AFPSCharacter::CycleInteractionPrev()
 
 void AFPSCharacter::CycleInteractionInput(const FInputActionValue& Value)
 {
-	const float Axis = Value.Get<float>();
+	ApplyCycleInteraction(Value.Get<float>());
+}
+
+void AFPSCharacter::OnMouseWheelRaw(float Axis)
+{
+	ApplyCycleInteraction(Axis);
+}
+
+void AFPSCharacter::ApplyCycleInteraction(float Axis)
+{
+	const float Now = GetWorld() ? GetWorld()->GetRealTimeSeconds() : 0.0f;
+	if (Now - LastCycleInteractionTime < 0.05f)
+		return;
+	LastCycleInteractionTime = Now;
+
+	UE_LOG(LogTemp, Log, TEXT("[CycleInteraction] Axis=%.3f NumEntries=%d SelectedIndex=%d"),
+		Axis,
+		InteractionManager ? InteractionManager->GetEntries().Num() : -1,
+		InteractionManager ? InteractionManager->GetSelectedIndex() : -1);
+
 	if (Axis > 0.1f)
-		CycleInteractionNext();
-	else if (Axis < -0.1f)
 		CycleInteractionPrev();
+	else if (Axis < -0.1f)
+		CycleInteractionNext();
 }
 
 // ---------------------------------------------------------------------------
@@ -1516,8 +1568,9 @@ void AFPSCharacter::OnHoTApplicationComplete()
 	if (!HasAuthority())
 		return;
 
+	const float Duration = PendingHoTBaseDuration;  // 必须在 CompleteItemUse 前保存，ClearItemUseState 会清零
 	CompleteItemUse();
-	ActivateHoT(PendingHoTBaseDuration);
+	ActivateHoT(Duration);
 }
 
 void AFPSCharacter::CompleteItemUse()
@@ -1617,6 +1670,10 @@ void AFPSCharacter::OnHoTTick()
 	ServerApplyHeal(HoTHealPerTick);
 	HoTRemainingTime -= HoTTickInterval;
 
+	// 同步更新复制结构体 + 广播给 listen server host 的 HUD
+	HoTState.RemainingDuration = FMath::Max(HoTRemainingTime, 0.0f);
+	OnHoTChanged.Broadcast(true, HoTState.RemainingDuration, HoTState.MaxDuration);
+
 	if (HoTRemainingTime <= 0.0f)
 	{
 		DeactivateHoT();
@@ -1653,4 +1710,44 @@ void AFPSCharacter::OnRep_HoTState()
 		return;
 
 	OnHoTChanged.Broadcast(HoTState.bActive, HoTState.RemainingDuration, HoTState.MaxDuration);
+}
+
+// ---------------------------------------------------------------------------
+// 游戏消息推送系统
+// ---------------------------------------------------------------------------
+
+void AFPSCharacter::PushGameMessage(const FString& Text, EFPSMessageWeight Weight, float Lifetime)
+{
+	FFPSGameMessage Msg;
+	Msg.Text = Text;
+	Msg.Weight = Weight;
+	Msg.Lifetime = Lifetime;
+	OnGameMessage.Broadcast(Msg);
+}
+
+void AFPSCharacter::ClientPushGameMessage_Implementation(const FString& Text, EFPSMessageWeight Weight, float Lifetime)
+{
+	PushGameMessage(Text, Weight, Lifetime);
+}
+
+void AFPSCharacter::BroadcastGameMessage(UObject* WorldContextObject, const FString& Text,
+	EFPSMessageWeight Weight, float Lifetime)
+{
+	if (!WorldContextObject)
+		return;
+
+	UWorld* World = WorldContextObject->GetWorld();
+	if (!World)
+		return;
+
+	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+	{
+		APlayerController* PC = It->Get();
+		if (!PC) continue;
+
+		AFPSCharacter* Char = Cast<AFPSCharacter>(PC->GetPawn());
+		if (!Char) continue;
+
+		Char->ClientPushGameMessage(Text, Weight, Lifetime);
+	}
 }

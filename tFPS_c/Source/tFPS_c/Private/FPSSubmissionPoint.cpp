@@ -75,6 +75,16 @@ void AFPSSubmissionPoint::SetOpen(bool bOpen)
 
 	SubmissionState = NewState;
 	ScheduleNextStateChange();
+
+	// 提交点开放/关闭消息广播
+	{
+		const bool bNowOpen = (NewState == EFPSSubmissionState::Open);
+		AFPSCharacter::BroadcastGameMessage(this,
+			bNowOpen ? TEXT("提交点已开放") : TEXT("提交点已关闭"),
+			bNowOpen ? EFPSMessageWeight::Warning : EFPSMessageWeight::Info,
+			bNowOpen ? 5.0f : 3.0f);
+	}
+
 	// UpdateOverlappingCharacters + OnSubmissionStateChanged are handled in OnRep_SubmissionState,
 	// which fires on both clients AND the listen-server host when the variable changes.
 }

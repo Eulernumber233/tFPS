@@ -35,10 +35,11 @@ int32 UFPSItemDef::GetCurrentValue(const FInventoryEntry& Entry) const
 
 UFPSHealItemDef::UFPSHealItemDef()
 {
-	bUsesDurability = true;   // 血包每个独立占一格，治疗扣耐久
+	bUsesDurability = true;
 	MaxStack = 1;
-	DefaultValue = 64;        // 默认满耐久 64（蓝图数据资产里可改）
-	UseTime = 0.0f;           // 即时生效
+	DefaultValue = 64;
+	UseTime = 0.0f;
+	Description = NSLOCTEXT("UFPSItemDef", "HealDesc", "立即恢复一定生命值，消耗等量耐久。");
 }
 
 bool UFPSHealItemDef::ServerCanUse(AFPSCharacter* User, const FInventoryEntry& Entry) const
@@ -65,15 +66,16 @@ int32 UFPSHealItemDef::ServerUseItem(AFPSCharacter* User, FInventoryEntry& Entry
 }
 
 // ---------------------------------------------------------------------------
-// UFPSChanneledHealItemDef（Type 2 — 引导治疗，三角洲大血包风格）
+// UFPSChanneledHealItemDef（Type 2 — 引导治疗）
 // ---------------------------------------------------------------------------
 
 UFPSChanneledHealItemDef::UFPSChanneledHealItemDef()
 {
-	bUsesDurability = true;   // 耐久 = 总可治疗量
+	bUsesDurability = true;
 	MaxStack = 1;
-	DefaultValue = 100;       // 默认满耐久 100（蓝图可改）
-	UseTime = 2.0f;           // 2 秒前摇
+	DefaultValue = 100;
+	UseTime = 2.0f;
+	Description = NSLOCTEXT("UFPSItemDef", "ChanneledHealDesc", "前摇后逐跳恢复生命值。F键可中途取消。");
 }
 
 bool UFPSChanneledHealItemDef::ServerCanUse(AFPSCharacter* User, const FInventoryEntry& Entry) const
@@ -94,21 +96,21 @@ int32 UFPSChanneledHealItemDef::ServerUseItem(AFPSCharacter* User, FInventoryEnt
 	if (Committed <= 0)
 		return 0;
 
-	// 耐久一次性扣除，后续由 Character 状态机逐跳回血
 	Entry.Durability -= Committed;
 	return Committed;
 }
 
 // ---------------------------------------------------------------------------
-// UFPSHoTItemDef（Type 3 — 持续回血 Buff，PUBG 止疼药风格）
+// UFPSHoTItemDef（Type 3 — 持续回血 Buff）
 // ---------------------------------------------------------------------------
 
 UFPSHoTItemDef::UFPSHoTItemDef()
 {
-	bUsesDurability = false;   // 可堆叠的一次性消耗品（Count 记瓶数）
-	MaxStack = 4;              // 一格最多叠 4 瓶
-	DefaultValue = 1;          // 捡一次给 1 瓶
-	UseTime = 3.0f;            // 3 秒使用时间（Character 的 HoTHealPerSecond 和 HoTMaxBuffDuration 决定回血速度和上限）
+	bUsesDurability = false;
+	MaxStack = 4;
+	DefaultValue = 1;
+	UseTime = 3.0f;
+	Description = NSLOCTEXT("UFPSItemDef", "HoTDesc", "使用后激活持续回血效果，可叠加延长持续时间。");
 }
 
 bool UFPSHoTItemDef::ServerCanUse(AFPSCharacter* User, const FInventoryEntry& Entry) const
@@ -116,7 +118,6 @@ bool UFPSHoTItemDef::ServerCanUse(AFPSCharacter* User, const FInventoryEntry& En
 	if (!Super::ServerCanUse(User, Entry))
 		return false;
 
-	// 只要有瓶就能喝 — 满血也能喝（预刷 buff 应对即将到来的战斗）
 	return Entry.Count > 0;
 }
 
@@ -126,7 +127,7 @@ int32 UFPSHoTItemDef::ServerUseItem(AFPSCharacter* User, FInventoryEntry& Entry)
 		return 0;
 
 	Entry.Count -= 1;
-	return 1;   // 消耗 1 瓶
+	return 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -138,7 +139,8 @@ UFPSValuableItemDef::UFPSValuableItemDef()
 	bUsesDurability = false;
 	MaxStack = 1;
 	DefaultValue = 1;
-	Value = 1000;   // 默认价值（金条/钻石在蓝图数据资产里填具体值）
+	Value = 1000;
+	Description = NSLOCTEXT("UFPSItemDef", "ValuableDesc", "贵重物品，不可使用。带到提交点可换取带出积分。");
 }
 
 // ---------------------------------------------------------------------------
@@ -148,8 +150,9 @@ UFPSValuableItemDef::UFPSValuableItemDef()
 UFPSAmmoItemDef::UFPSAmmoItemDef()
 {
 	bUsesDurability = false;
-	MaxStack = 120;       // 单格最多叠 120 发
-	DefaultValue = 30;    // 捡一次给 30 发
+	MaxStack = 120;
+	DefaultValue = 30;
 	Tier = 1;
-	Value = 1;            // 子弹基础价值很低
+	Value = 1;
+	Description = NSLOCTEXT("UFPSItemDef", "AmmoDesc", "弹药，不同口径/等级不可混用。");
 }

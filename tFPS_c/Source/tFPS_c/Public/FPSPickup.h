@@ -8,19 +8,17 @@
 class UFPSItemDef;
 class USphereComponent;
 class USceneComponent;
-class UStaticMeshComponent;
 class AFPSCharacter;
 
 /**
  * 地上的拾取物 Actor（复制）。
  *
- * C++ 提供完整组件层级：
+ * C++ 提供最小组件层级（不包含可见网格体，由蓝图层自行添加）：
  *   - DefaultRoot（USceneComponent）
- *   - PickupMeshComponent（UStaticMeshComponent）：OnConstruction/BeginPlay 从 ItemDef->PickupMesh 自动赋值
  *   - PickupSphere（USphereComponent）：拾取范围触发器
  *
- * 通用用法：建一个 BP_Pickup_Generic 继承本类，不需要加任何组件。
- *   ItemDef 的 PickupMesh 填什么模型，地上就显示什么模型。
+ * 通用用法：建一个 BP_Pickup_Generic 继承本类，在蓝图层添加 StaticMesh 组件挂在 DefaultRoot 下。
+ *   需要模型时直接读 ItemDef->PickupMesh 赋给蓝图自己的 StaticMesh。
  * 特殊用法：需要专属粒子/动画的道具，单独建 BP_Pickup_xxx 子类，
  *   DA 的 PickupMesh 留空、DropPickupClass 指向专用子类。
  *
@@ -42,7 +40,7 @@ public:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 	/** 这个 Pickup 代表哪种道具（蓝图子类指定，指向 DA_xxx 资产）。 */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Pickup")
+	UPROPERTY(Replicated, EditAnywhere, BlueprintReadOnly, Category = "Pickup")
 	TObjectPtr<UFPSItemDef> ItemDef = nullptr;
 
 	/**
@@ -78,10 +76,6 @@ protected:
 	UPROPERTY(VisibleAnywhere, Category = "Pickup")
 	TObjectPtr<USceneComponent> DefaultRoot;
 
-	/** 地上显示的网格体。OnConstruction 从 ItemDef->PickupMesh 自动赋值。专用子类可不设 DA 的 PickupMesh，改在蓝图层替换此组件。 */
-	UPROPERTY(VisibleAnywhere, Category = "Pickup")
-	TObjectPtr<UStaticMeshComponent> PickupMeshComponent;
-
 	/** 拾取范围触发器。 */
 	UPROPERTY(VisibleAnywhere, Category = "Pickup")
 	TObjectPtr<USphereComponent> PickupSphere;
@@ -97,9 +91,6 @@ protected:
 	/** 丢弃时携带的运行时状态（耐久/数量），bHasOverride 为 true 时拾取按它入背包。 */
 	UPROPERTY(Replicated)
 	FInventoryEntry OverrideEntry;
-
-	/** 从 ItemDef->PickupMesh 读取并赋给 PickupMeshComponent。OnConstruction + BeginPlay 各调一次。 */
-	void ApplyPickupMeshFromItemDef();
 
 	UFUNCTION()
 	void OnSphereBeginOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,

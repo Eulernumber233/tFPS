@@ -71,6 +71,37 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnHoTChanged, bool, bActive, flo
 
 // ---- 武器系统信号（蓝图 UI 订阅） ----
 
+// ---- 游戏消息推送系统 ----
+
+/** 消息重量级 — 蓝图端决定文字颜色 */
+UENUM(BlueprintType)
+enum class EFPSMessageWeight : uint8
+{
+	Info     UMETA(DisplayName = "Info"),       // 白色 — 系统信息（玩家加入、提交点关闭）
+	Success  UMETA(DisplayName = "Success"),     // 绿色 — 正面事件
+	Warning  UMETA(DisplayName = "Warning"),     // 黄色 — 倒计时、提交点开放
+	Critical UMETA(DisplayName = "Critical")     // 红色 — 击杀信息
+};
+
+/** 单条游戏消息。由服务端推送，客户端 Character 接收后广播给 WBP。 */
+USTRUCT(BlueprintType)
+struct FFPSGameMessage
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly)
+	FString Text;
+
+	UPROPERTY(BlueprintReadOnly)
+	EFPSMessageWeight Weight = EFPSMessageWeight::Info;
+
+	/** 显示时长（秒），WBP 端按 elapsed/lifetime 计算透明度。 */
+	UPROPERTY(BlueprintReadOnly)
+	float Lifetime = 5.0f;
+};
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnGameMessage, const FFPSGameMessage&, Message);
+
 /** 拾取武器到槽位（空槽放入时触发）。 */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnWeaponPickedUp, AFPSWeapon*, Weapon, int32, Slot);
 
@@ -133,6 +164,14 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Health")
 	float GetRespawnDelay() const { return RespawnDelay; }
+
+	/** 比赛剩余时间（秒）。从 GameState 读取，所有端可用。Playing 阶段倒计时，其他阶段返回 -1。 */
+	UFUNCTION(BlueprintCallable, Category = "Match")
+	float GetTimeRemaining() const;
+
+	/** 准备倒计时秒数（Countdown 阶段）。从 GameState 读取，所有端可用。 */
+	UFUNCTION(BlueprintCallable, Category = "Match")
+	int32 GetCountdownSeconds() const;
 
 	// ---- 体力（服务端权威，复制到客户端给 UI） ----
 
@@ -463,6 +502,26 @@ public:
 
 	// ---- 武器系统信号 ----
 
+	/** 游戏消息推送 —— WBP 订阅后创建消息条显示在画面右上角。 */
+	UPROPERTY(BlueprintAssignable, Category = "UI|Messages")
+	FOnGameMessage OnGameMessage;
+
+	/**
+	 * 本地推送一条消息（纯本地，不复制）。立即广播 OnGameMessage。
+	 * 供蓝图直接调用（客户端本地生成消息）。
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UI|Messages")
+	void PushGameMessage(const FString& Text, EFPSMessageWeight Weight = EFPSMessageWeight::Info, float Lifetime = 5.0f);
+
+	/**
+	 * 服务端向所有玩家推送一条消息。遍历所有 PlayerController → Character，
+	 * 通过 Client RPC 发送到每个客户端，各自广播 OnGameMessage。
+	 * WorldContext 自动从调用蓝图获取。
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UI|Messages", meta = (WorldContext = "WorldContextObject"))
+	static void BroadcastGameMessage(UObject* WorldContextObject, const FString& Text,
+		EFPSMessageWeight Weight = EFPSMessageWeight::Info, float Lifetime = 5.0f);
+
 	/** 拾取武器到空槽位时广播（Pick Up）。 */
 	UPROPERTY(BlueprintAssignable, Category = "Weapon")
 	FOnWeaponPickedUp OnWeaponPickedUp;
@@ -638,6 +697,9 @@ protected:
 	uint8 bWantsToRun : 1;
 	uint8 bWantsToAim : 1;
 	uint8 bWantsToFire : 1;
+
+	/** 逐帧防抖：避免同一次滚轮滚动 Started+Triggered 重复处理 */
+	float LastCycleInteractionTime = 0.0f;
 
 	/** 奔跑打断开火后，松开 Shift 时若 LMB 仍按住是否恢复开火 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon")
@@ -837,8 +899,18 @@ protected:
 	UFUNCTION(Server, Reliable)
 	void ServerSubmitSingleItem(int32 Index);
 
-	/** 滚轮输入处理：正值=下一项，负值=上一项。 */
+	/** 服务端推一条消息到本客户端 Character。ClientPushGameMessage_Implementation 广播 OnGameMessage。 */
+	UFUNCTION(Client, Reliable)
+	void ClientPushGameMessage(const FString& Text, EFPSMessageWeight Weight, float Lifetime);
+
+	/** 滚轮输入处理（Enhanced Input 路径）：正值=下一项，负值=上一项。 */
 	void CycleInteractionInput(const FInputActionValue& Value);
+
+	/** 滚轮输入处理（原始 BindAxis 路径）：直接读系统轴值，不依赖 EI 触发器。 */
+	void OnMouseWheelRaw(float Axis);
+
+	/** 统一处理：去抖 + 路由到 Next/Prev。 */
+	void ApplyCycleInteraction(float Axis);
 
 	/** 服务端：将指定武器作为 Pickup 掉落在角色脚下（死亡/交换时调用）。 */
 	void DropWeaponAsPickup(AFPSWeapon* Weapon);

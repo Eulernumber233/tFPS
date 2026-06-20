@@ -127,6 +127,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Item")
 	FText DisplayName;
 
+	/** 道具描述语（以类为单位预设，蓝图 DataAsset 可覆盖）。tooltip / 详情面板展示用。 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Item")
+	FText Description;
+
 	/** 背包格子图标 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Item")
 	TObjectPtr<UTexture2D> Icon = nullptr;

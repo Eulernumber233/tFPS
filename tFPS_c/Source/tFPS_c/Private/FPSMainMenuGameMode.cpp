@@ -15,6 +15,6 @@ AFPSMainMenuGameMode::AFPSMainMenuGameMode()
 	// No default pawn — menu level doesn't spawn characters
 	DefaultPawnClass = nullptr;
 
-	// Use the same PlayerController for menu (C++ provides the logic base)
-	PlayerControllerClass = AFPSPlayerController::StaticClass();
+	// PlayerControllerClass is left unset here.
+	// Set it in the Blueprint subclass or Project Settings → Maps & Modes.
 }

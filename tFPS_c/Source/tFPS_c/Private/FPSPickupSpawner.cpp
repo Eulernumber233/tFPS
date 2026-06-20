@@ -4,6 +4,7 @@
 #include "Components/BillboardComponent.h"
 #include "Engine/World.h"
 #include "WorldCollision.h"
+#include "Engine/OverlapResult.h"
 #include "TimerManager.h"
 #include "UObject/ConstructorHelpers.h"
 
@@ -78,6 +79,13 @@ void AFPSPickupSpawner::StopSpawning()
 		GetWorld()->GetTimerManager().ClearTimer(SpawnTimerHandle);
 	}
 	bSpawning = false;
+
+	// 解绑旧 Pickup 的销毁委托，避免悬空回调
+	if (CurrentSpawnedPickup.IsValid())
+	{
+		CurrentSpawnedPickup->OnDestroyed.RemoveDynamic(this, &AFPSPickupSpawner::OnSpawnedPickupDestroyed);
+		CurrentSpawnedPickup.Reset();
+	}
 }
 
 void AFPSPickupSpawner::ScheduleNextSpawn()
@@ -105,6 +113,21 @@ void AFPSPickupSpawner::ForceSpawn()
 	TrySpawn();
 }
 
+void AFPSPickupSpawner::OnSpawnedPickupDestroyed(AActor* DestroyedActor)
+{
+	// 仅当销毁的是我们跟踪的 Pickup 时，才触发后续流程
+	if (DestroyedActor != CurrentSpawnedPickup.Get())
+		return;
+
+	CurrentSpawnedPickup.Reset();
+
+	// 通知蓝图：进入等待生成状态（倒计时开始）
+	OnWaitingForRespawn();
+
+	// 安排下一次生成
+	ScheduleNextSpawn();
+}
+
 // ============================================================================
 //  单次生成
 // ============================================================================
@@ -114,7 +137,17 @@ void AFPSPickupSpawner::TrySpawn()
 	if (!HasAuthority())
 		return;
 
-	// —— 防堆叠：当前位置已有 Pickup 则跳过本周期 ——
+	// —— 已有 Pickup 未被拾取，等待其销毁后再生成 ——
+	if (CurrentSpawnedPickup.IsValid())
+	{
+		// 不安排定时器：等 OnSpawnedPickupDestroyed 回调触发后再 ScheduleNextSpawn
+		return;
+	}
+
+	// 清理可能残留的无效弱引用
+	CurrentSpawnedPickup.Reset();
+
+	// —— 防堆叠：当前位置已有其他 Pickup 则跳过本周期 ——
 	if (IsPickupAlreadyAtSpawnPoint())
 	{
 		ScheduleNextSpawn();
@@ -152,19 +185,32 @@ void AFPSPickupSpawner::TrySpawn()
 		return;
 	}
 
-	// —— 生成 ——
+	// —— 延迟生成：先设 ItemDef，再 FinishSpawning 触发 Construction Script ——
 	const FVector SpawnLoc = GetActorLocation();
 	const FRotator SpawnRot = GetActorRotation();
 
-	AFPSPickup* Pickup = GetWorld()->SpawnActor<AFPSPickup>(PickupClass, SpawnLoc, SpawnRot);
-	if (Pickup)
+	AFPSPickup* Pickup = GetWorld()->SpawnActorDeferred<AFPSPickup>(
+		PickupClass,
+		FTransform(SpawnRot, SpawnLoc));
+	if (!Pickup)
 	{
-		// 覆写 ItemDef：蓝图 CDO 可能预设了另一个 ItemDef（如该蓝图专门为某道具设计网格体），
-		// 生成器需要动态设置为抽选出的道具类型
-		Pickup->ItemDef = SelectedItem;
+		ScheduleNextSpawn();
+		return;
 	}
 
-	ScheduleNextSpawn();
+	// 关键：Construction Script 运行前覆写 ItemDef，蓝图才能读到正确的 PickupMesh/DisplayName
+	Pickup->ItemDef = SelectedItem;
+
+	Pickup->FinishSpawning(FTransform(SpawnRot, SpawnLoc));
+
+	// —— 跟踪 + 绑定销毁事件 ——
+	CurrentSpawnedPickup = Pickup;
+	Pickup->OnDestroyed.AddDynamic(this, &AFPSPickupSpawner::OnSpawnedPickupDestroyed);
+
+	// —— 通知蓝图：生成成功 ——
+	OnSpawnSucceeded(Pickup);
+
+	// 不安排下一轮 timer：等待 OnSpawnedPickupDestroyed 回调触发后再 ScheduleNextSpawn
 }
 
 // ============================================================================
@@ -260,14 +306,22 @@ bool AFPSPickupSpawner::IsPickupAlreadyAtSpawnPoint() const
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(this);
 
-	// AFPSPickup 的 PickupSphere 对 ECC_Pawn 响应 Overlap，用 OverlapAnyTestByChannel
-	// 检是否有任何重叠（含 Pickup / 玩家等），有则跳过本周期防止堆叠。
-	return GetWorld()->OverlapAnyTestByChannel(
+	TArray<FOverlapResult> Overlaps;
+	GetWorld()->OverlapMultiByObjectType(
+		Overlaps,
 		GetActorLocation(),
 		FQuat::Identity,
-		ECC_Pawn,
+		FCollisionObjectQueryParams(ECC_WorldDynamic),   // Pickup 的 PickupSphere 是 WorldDynamic
 		Sphere,
 		QueryParams);
+
+	for (const FOverlapResult& Result : Overlaps)
+	{
+		if (Cast<AFPSPickup>(Result.GetActor()))
+			return true;
+	}
+
+	return false;
 }
 
 // ============================================================================

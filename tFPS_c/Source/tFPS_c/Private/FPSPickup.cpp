@@ -3,8 +3,6 @@
 #include "FPSCharacter.h"
 #include "FPSInventoryComponent.h"
 #include "Components/SphereComponent.h"
-#include "Components/StaticMeshComponent.h"
-#include "Engine/StaticMesh.h"
 #include "Net/UnrealNetwork.h"
 
 AFPSPickup::AFPSPickup()
@@ -15,12 +13,6 @@ AFPSPickup::AFPSPickup()
 	// C++ 空 Root（同 AFPSWeapon）：蓝图子类在其下挂 Mesh。
 	DefaultRoot = CreateDefaultSubobject<USceneComponent>(TEXT("DefaultRoot"));
 	SetRootComponent(DefaultRoot);
-
-	// 地上网格体：OnConstruction 从 ItemDef->PickupMesh 自动赋值。
-	// 专用蓝图子类如不需要此组件，可在蓝图层隐藏/替换。
-	PickupMeshComponent = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("PickupMesh"));
-	PickupMeshComponent->SetupAttachment(DefaultRoot);
-	PickupMeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
 	// 拾取范围触发器。只做 overlap 检测，不挡任何东西。
 	PickupSphere = CreateDefaultSubobject<USphereComponent>(TEXT("PickupSphere"));
@@ -36,6 +28,7 @@ AFPSPickup::AFPSPickup()
 void AFPSPickup::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME(AFPSPickup, ItemDef);
 	DOREPLIFETIME(AFPSPickup, bHasOverride);
 	DOREPLIFETIME(AFPSPickup, OverrideEntry);
 }
@@ -50,39 +43,32 @@ void AFPSPickup::SetDroppedState(const FInventoryEntry& Entry)
 	OverrideEntry = Entry;
 	OverrideEntry.GridX = -1;   // 落地后坐标作废，捡回时重新装箱
 	OverrideEntry.GridY = -1;
+
+	// 同步 ItemDef：丢弃时 Pickup 是动态生成的，ItemDef 需从 Entry 中赋值
+	ItemDef = Entry.ItemDef;
 }
 
 void AFPSPickup::BeginPlay()
 {
 	Super::BeginPlay();
 
+	UE_LOG(LogTemp, Log, TEXT("[Pickup] BeginPlay: %s | HasAuth=%d | ItemDef=%s | bHasOverride=%d | OverrideEntry.ItemDef=%s | OverrideEntry.Count=%d | OverrideEntry.Durability=%d"),
+		*GetName(),
+		HasAuthority() ? 1 : 0,
+		ItemDef ? *ItemDef->GetName() : TEXT("null"),
+		bHasOverride ? 1 : 0,
+		OverrideEntry.ItemDef ? *OverrideEntry.ItemDef->GetName() : TEXT("null"),
+		OverrideEntry.Count,
+		OverrideEntry.Durability);
+
 	PickupSphere->SetSphereRadius(PickupRadius);
 	PickupSphere->OnComponentBeginOverlap.AddDynamic(this, &AFPSPickup::OnSphereBeginOverlap);
 	PickupSphere->OnComponentEndOverlap.AddDynamic(this, &AFPSPickup::OnSphereEndOverlap);
-
-	// 运行时也刷一次：OnConstruction 可能只在服务端 SpawnActor 时跑过，
-	// 客户端 BeginPlay 补一次保证网格体在各端都显示。
-	ApplyPickupMeshFromItemDef();
 }
 
 void AFPSPickup::OnConstruction(const FTransform& Transform)
 {
 	Super::OnConstruction(Transform);
-
-	ApplyPickupMeshFromItemDef();
-}
-
-void AFPSPickup::ApplyPickupMeshFromItemDef()
-{
-	if (!PickupMeshComponent || !ItemDef || ItemDef->PickupMesh.IsNull())
-		return;
-
-	UStaticMesh* Mesh = ItemDef->PickupMesh.LoadSynchronous();
-	if (Mesh)
-	{
-		PickupMeshComponent->SetStaticMesh(Mesh);
-		PickupMeshComponent->SetVisibility(true);
-	}
 }
 
 void AFPSPickup::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -120,34 +106,52 @@ void AFPSPickup::OnSphereEndOverlap(UPrimitiveComponent* OverlappedComp, AActor*
 void AFPSPickup::ServerTryPickup(AFPSCharacter* Picker)
 {
 	if (!HasAuthority() || !Picker || !ItemDef)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Pickup] ServerTryPickup EARLY RETURN: HasAuth=%d Picker=%s ItemDef=%s"),
+			HasAuthority() ? 1 : 0,
+			Picker ? *Picker->GetName() : TEXT("null"),
+			ItemDef ? *ItemDef->GetName() : TEXT("null"));
 		return;
+	}
 
 	UFPSInventoryComponent* Inv = Picker->GetInventory();
 	if (!Inv)
 		return;
 
-	// 丢弃落地的 Pickup 带原耐久/数量（bHasOverride）→ 走 ServerAddEntry 还原状态；
-	// 地图手摆的 Pickup → 走 ServerAddItem 用 DefaultValue。
 	bool bAdded;
-	if (bHasOverride)
+	// Only trust bHasOverride when SetDroppedState actually wrote OverrideEntry.
+	// If OverrideEntry.ItemDef is still nullptr, bHasOverride was leaked (e.g. blueprint
+	// default) and we must fall through to ServerAddItem for correct DefaultValue init.
+	const bool bUseOverride = bHasOverride && OverrideEntry.ItemDef != nullptr;
+	if (bUseOverride)
 	{
 		FInventoryEntry Entry = OverrideEntry;
-		Entry.ItemDef = ItemDef;   // 以 Pickup 自己的 ItemDef 为准
+		Entry.ItemDef = ItemDef;
+		UE_LOG(LogTemp, Log, TEXT("[Pickup] ServerTryPickup: %s via ServerAddEntry (bHasOverride=true) | Entry.Count=%d Entry.Durability=%d"),
+			*ItemDef->GetName(), Entry.Count, Entry.Durability);
 		bAdded = Inv->ServerAddEntry(Entry);
 	}
 	else
 	{
+		if (bHasOverride)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Pickup] ServerTryPickup: %s bHasOverride=true but OverrideEntry.ItemDef=null — falling back to ServerAddItem. Check blueprint defaults for bHasOverride!"),
+				*ItemDef->GetName());
+		}
+		else
+		{
+			UE_LOG(LogTemp, Log, TEXT("[Pickup] ServerTryPickup: %s via ServerAddItem (bHasOverride=false)"),
+				*ItemDef->GetName());
+		}
 		bAdded = Inv->ServerAddItem(ItemDef);
 	}
 
 	if (bAdded)
 	{
-		// 进背包成功 → 销毁地上的 Pickup（复制销毁，所有端同步消失）。
 		Destroy();
 	}
 	else
 	{
-		// 背包满：保留在地上，通知蓝图做提示（"背包已满"）。
 		OnPickupBlocked();
 	}
 }
