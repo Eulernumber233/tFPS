@@ -30,3 +30,7 @@ cmake-build-*/
 
 # Custom
 .claude/plan/
+
+# Packaging output
+Output/
+Build/

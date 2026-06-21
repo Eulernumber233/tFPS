@@ -33,6 +33,8 @@ AFPSPickup            [复制 Actor]  地上拾取物，Root + StaticMesh(自动
 UFPSInteractionComponent[挂 Character] 交互管理器：管理所有 F 键交互目标的列表，滚轮切换选中项
 AFPSSubmissionPoint   [复制 Actor]  物品提交点：随机开放/关闭，开放时玩家提交贵重品累加 CarryValue
 AFPSPickupSpawner     [仅服务端]    掉落物生成器：周期生成 Pickup，Tier递进+权重抽选+防堆叠
+AFPSMenuCameraRig     [仅本机]      菜单地图摄像机轨道：Spline 驱动 CineCameraActor 循环移动
+AFPSMainMenuGameMode  [仅本机]      菜单 GameMode：不生成 Pawn，可配置自动生成 CameraRig
 ```
 
 ## 蓝图可读状态（所有端）
@@ -1041,6 +1043,74 @@ Health ≤ 0 → 服务端处理：
 | ServerSubmitAllValuables | Client→Server | Reliable | 一键提交背包所有贵重品到最近开放提交点 |
 | ServerSubmitSingleItem | Client→Server | Reliable | 单独提交背包第 N 格到最近开放提交点 |
 | ClientRespawn | Server→Client | Reliable | 通知复活 |
+
+## 菜单地图摄像机系统（AFPSMenuCameraRig）
+
+菜单地图 (`Test_NetFPS_MainMenu`) 使用 `AFPSMenuCameraRig` 驱动 `ACineCameraActor` 沿 Spline 循环移动，作为半透明 UMG 菜单背景。
+
+### C++ 类设计
+
+| 类 | 作用 |
+|---|---|
+| `AFPSMenuCameraRig` | Actor，Root=USplineComponent，Tick 中驱动 CineCameraActor 沿轨道移动 |
+| `AFPSMainMenuGameMode` | 加 `MenuCameraRigClass` 属性，BeginPlay 自动 SpawnActor |
+
+### AFPSMenuCameraRig 关键属性
+
+| 属性 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `SplineComponent` | USplineComponent* | — | 摄像机轨道（Root），编辑器里加控制点 |
+| `CameraActor` | ACineCameraActor* | 空 | 要移动的 CineCameraActor（场景中拖入引用） |
+| `OrbitSpeed` | float | 200 | 移动速度 (cm/s) |
+| `bAutoActivate` | bool | true | BeginPlay 自动开始 + 设 ViewTarget |
+| `ViewBlendTime` | float | 0.5 | 切换到此摄像机的混合时间 |
+| `LoopMode` | enum | Loop | Loop=循环跳回起点 / PingPong=往返 |
+| `RotationMode` | enum | FollowSpline | FollowSpline=沿轨道方向 / LookAtTarget=看向目标 / Fixed=保持原旋转 |
+| `LookAtTarget` | AActor* | 空 | RotationMode=LookAtTarget 时看向的 Actor |
+
+### 蓝图函数
+
+| 函数 | 用途 |
+|---|---|
+| `StartOrbit()` | 开始/恢复摄像机移动（BlueprintCallable） |
+| `StopOrbit()` | 暂停摄像机移动（BlueprintCallable） |
+
+### 编辑器设置步骤
+
+1. **在菜单地图中放置 `CineCameraActor`**：
+   - 从 Place Actors 面板拖入 CineCameraActor
+   - 调整 Camera 分类下的 FOV、Aperture 等
+   - 放置在地图中有视野的位置（面向希望看到的区域）
+
+2. **放置 Spline 轨道**（两种方式）：
+   - **方式 A（手拖）**：直接在菜单地图中拖入 `AFPSMenuCameraRig`（蓝图子类），选中 Spline 组件右键 Add Spline Point，拉控制点画出轨道
+   - **方式 B（GameMode 自动生成）**：在 `BP_MainMenuGameMode` Class Defaults → Menu → MenuCameraRigClass 选 BP 子类。然后在蓝图的 Construction Script 或 BeginPlay 中手动配置 Spline 点（需蓝图子类）
+
+   推荐方式 A：手动拖入 Actor 后直接在地图中编辑 Spline 曲线。
+
+3. **关联 CameraActor**：
+   - 选中 Rig → Details → Camera → CameraActor → 下拉/拖入场景中的 CineCameraActor
+
+4. **调整参数**：
+   - `OrbitSpeed`：推荐 100–300 cm/s（缓慢扫过）
+   - `RotationMode`：推荐 `LookAtTarget`，放一个 Empty Actor 在地图中央作为目标
+   - `LoopMode`：推荐 `Loop`
+
+5. **半透明菜单**：
+   - 打开 `WBP_MainMenu` → 选中根 Panel（Border/Image）
+   - Background Color → Alpha 设为 0.6~0.8
+   - 输入模式确保使用 `SetInputModeGameAndUI`（不锁视角，摄像机继续动）
+
+### 工作流
+
+```
+BeginPlay:
+  1. AFPSMainMenuGameMode::BeginPlay → SpawnActor(MenuCameraRigClass)
+  2. AFPSMenuCameraRig::BeginPlay → PC->SetViewTargetWithBlend(CameraActor)
+  3. Tick 循环 → CameraActor 沿 Spline 移动 → 菜单背景持续变化
+关卡切换:
+  4. 玩家点 Host/Join → ServerTravel / ClientTravel → 菜单地图卸载 → Rig 自动销毁
+```
 
 ## 编译与运行
 

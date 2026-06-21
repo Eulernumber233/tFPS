@@ -50,5 +50,5 @@ protected:
 
 	/** Main menu map name. */
 	UPROPERTY(EditDefaultsOnly, Category = "Network")
-	FString MainMenuMapName = TEXT("MainMenuMap");
+	FString MainMenuMapName = TEXT("Test_NetFPS_MainMenu");
 };

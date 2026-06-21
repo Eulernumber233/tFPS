@@ -456,7 +456,7 @@ void AFPSCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompon
 
 	if (InputJump)
 	{
-		EIC->BindAction(InputJump, ETriggerEvent::Started, this, &ACharacter::Jump);
+		EIC->BindAction(InputJump, ETriggerEvent::Started, this, &AFPSCharacter::StartJump);
 		EIC->BindAction(InputJump, ETriggerEvent::Completed, this, &ACharacter::StopJumping);
 	}
 
@@ -608,6 +608,14 @@ void AFPSCharacter::StopAim()
 	bWantsToAim = false;
 	OnAimStopped.Broadcast();
 	ServerSetWantsToAim(false);
+}
+
+void AFPSCharacter::StartJump()
+{
+	if (IsActionLocked())
+		return;
+
+	Jump();
 }
 
 void AFPSCharacter::ServerSetWantsToRun_Implementation(bool bNewWantsToRun)

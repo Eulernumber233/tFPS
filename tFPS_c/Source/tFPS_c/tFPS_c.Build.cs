@@ -18,6 +18,7 @@ public class tFPS_c : ModuleRules
 			"UMG",
 			"Json",
 			"JsonUtilities",
+		"CinematicCamera",
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] { });

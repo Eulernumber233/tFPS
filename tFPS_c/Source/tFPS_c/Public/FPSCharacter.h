@@ -827,6 +827,8 @@ protected:
 	void StartAim();
 	void StopAim();
 
+	void StartJump();
+
 	void StartFire();
 	void StopFire();
 
